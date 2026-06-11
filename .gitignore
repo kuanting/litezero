@@ -1,0 +1,24 @@
+# Dependencies (the simulator itself is zero-dependency; this guards stray installs)
+node_modules/
+
+# Generated artifacts (recreate with `npm run reproduce`)
+out/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Python (tools/mavlink_interop_check.py)
+__pycache__/
+*.pyc
+.venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

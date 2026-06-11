@@ -1,0 +1,17 @@
+### litezero-auth ###
+│  All 2 queries pass | 5173 deductions | 00:02:09                             │
+     Pass ✓ authentication? User -> Drone: usersig
+     Pass ✓ authentication? User -> Cloud: authsig
+     Pass ✓ All 2 queries pass.
+### litezero-secrecy ###
+│  All 3 queries pass | 5998 deductions | 00:05:42                             │
+     Pass ✓ confidentiality? km_u
+     Pass ✓ confidentiality? m_u
+     Pass ✓ authentication? User -> Drone: macu
+     Pass ✓ All 3 queries pass.
+### litezero-fs ###
+│  All 2 queries pass | 7493 deductions | 00:10:59                             │
+     Pass ✓ confidentiality? ku2_u
+     Pass ✓ confidentiality? m_u2
+     Pass ✓ All 2 queries pass.
+ALL_DONE

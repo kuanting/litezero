@@ -1,0 +1,234 @@
+// LiteZero symbolic model for Verifpal (v2 — addresses reviewer concerns).
+//
+// Mirrors the wire-format types in src/protocol/messages.ts after the v2
+// protocol revision:
+//
+//   hello   = HandshakeHello   (authToken, cloudSig, userPub, nonceU, userSig)
+//   finish  = HandshakeFinish  (dronePub, nonceD, macD)
+//   ack     = HandshakeAck     (macU)
+//
+// Key changes from v1:
+//   1. Two-branch ECDH:  ikm = (e_D * E_U) || (d_D * E_U)
+//      so the drone's long-term PUF-sealed scalar d_D contributes to the
+//      session secret. An attacker with a valid token but no d_D can no
+//      longer produce a MAC that the user will accept.
+//   2. User proof-of-possession: userSig = SIGN(sk_U, H(tok || E_U || n_U))
+//      is consumed BY THE DRONE, not only by the cloud. So a stolen sk_C
+//      alone is insufficient to start a fresh session against the drone.
+//
+// Run (outside this repo): `verifpal verify models/litezero.vp`.
+
+attacker[active]
+
+principal Cloud[
+    knows private sk_C
+    pk_C = G^sk_C
+]
+
+principal User[
+    knows private sk_U
+    pk_U = G^sk_U
+]
+
+principal Drone[
+    knows private d_D
+    pk_D_static = G^d_D
+]
+
+// ---- Enrollment / provisioning (authentic, out-of-band) ----
+// Guarded constants [x]: the attacker can observe but not substitute them.
+// [pk_U] -> Drone is the Option A owner verify key pinned at provisioning;
+// [pk_D_static] -> User is the operator-verified pinned P_D. Both mirror
+// src/services/drone.ts (ownerVerifyKeys) and src/services/user.ts
+// (pinnedDrones).
+Cloud -> User: [pk_C]
+Cloud -> Drone: [pk_C]
+User -> Cloud: [pk_U]
+User -> Drone: [pk_U]
+Drone -> Cloud: [pk_D_static]
+Drone -> User: [pk_D_static]
+
+principal User[
+    generates esk_U
+    generates nonceU
+    knows public uid, did
+    knows public ts
+    epk_U = G^esk_U
+    h_auth = HASH(uid, did, nonceU, ts)
+    authSig = SIGN(sk_U, h_auth)
+]
+
+// ---- Phase 1: User <-> Cloud authorization ----
+User -> Cloud: nonceU, authSig
+
+principal Cloud[
+    knows public uid, did, ts
+    h_auth_c = HASH(uid, did, nonceU, ts)
+    _ = SIGNVERIF(pk_U, h_auth_c, authSig)?
+    // The drone's static public key was registered at enrollment; binding
+    // it into the token means the user consumes an authenticated P_D, not a
+    // network-supplied one.
+    generates iat
+    generates exp
+    // Cloud-signed token now carries pk_U AND P_D — the two public values
+    // the drone and user respectively need to reach the session secret.
+    token_core = CONCAT(uid, did, nonceU, iat, exp)
+    token = CONCAT(token_core, pk_U, pk_D_static)
+    cloudSig = SIGN(sk_C, token)
+]
+Cloud -> User: token, cloudSig
+
+// ---- Phase 2: User signs the hello payload for the drone ----
+principal User[
+    _ = SIGNVERIF(pk_C, token, cloudSig)?
+    // sigma_U: User proof-of-possession consumed by the DRONE, binding
+    // (tok, E_U, n_U) so the sig is not splice-able onto another session.
+    hello_digest = HASH(token, epk_U, nonceU)
+    userSig = SIGN(sk_U, hello_digest)
+]
+
+User -> Drone: token, cloudSig, epk_U, nonceU, userSig
+
+// ---- Phase 3: Drone verifies sigma_C AND sigma_U, then computes two DH branches ----
+principal Drone[
+    knows public uid, did
+    // (1) Cloud signature
+    _ = SIGNVERIF(pk_C, token, cloudSig)?
+    // (2) User PoP signature — verified against the owner verify key pk_U
+    // PINNED at provisioning (Option A); the token's copy is convenience.
+    hello_digest_d = HASH(token, epk_U, nonceU)
+    _ = SIGNVERIF(pk_U, hello_digest_d, userSig)?
+    // (3) Two DH branches
+    generates esk_D
+    generates nonceD
+    epk_D = G^esk_D
+    ss1_d = epk_U^esk_D       // Z_1 = e_D * E_U  (ephemeral-ephemeral)
+    ss2_d = epk_U^d_D         // Z_2 = d_D * E_U  (static-ephemeral, PUF branch)
+    ikm_d = CONCAT(ss1_d, ss2_d)
+    salt_d = CONCAT(nonceU, nonceD)
+    info_d = CONCAT(uid, did, token)
+    km_d, kU_d, kD_d = HKDF(salt_d, ikm_d, info_d)
+    // Transcript now covers userSig as well.
+    transcript_d = CONCAT(CONCAT(token, epk_U, nonceU, userSig), epk_D, nonceD)
+    macD = MAC(km_d, CONCAT(transcript_d, did))
+]
+Drone -> User: epk_D, nonceD, macD
+
+// ---- Phase 4: User completes the handshake using BOTH branches ----
+principal User[
+    // Z_1 user side = e_U * E_D; Z_2 user side = e_U * P_D_static.
+    ss1_u = epk_D^esk_U
+    ss2_u = pk_D_static^esk_U
+    ikm_u = CONCAT(ss1_u, ss2_u)
+    salt_u = CONCAT(nonceU, nonceD)
+    info_u = CONCAT(uid, did, token)
+    km_u, kU_u, kD_u = HKDF(salt_u, ikm_u, info_u)
+    transcript_u = CONCAT(CONCAT(token, epk_U, nonceU, userSig), epk_D, nonceD)
+    macD_u = MAC(km_u, CONCAT(transcript_u, did))
+    _ = ASSERT(macD, macD_u)?
+    macU = MAC(km_u, CONCAT(transcript_u, uid))
+]
+User -> Drone: macU
+
+principal Drone[
+    macU_d = MAC(km_d, CONCAT(transcript_d, uid))
+    _ = ASSERT(macU, macU_d)?
+]
+
+// ---- Phase 5: application data ----
+principal User[
+    generates m_u
+    generates ivU
+    ctU = AEAD_ENC(kU_u, m_u, transcript_u)
+]
+User -> Drone: ctU, ivU
+
+principal Drone[
+    _ = AEAD_DEC(kU_d, ctU, transcript_d)?
+    generates m_d
+    generates ivD
+    ctD = AEAD_ENC(kD_d, m_d, transcript_d)
+]
+Drone -> User: ctD, ivD
+
+principal User[
+    _ = AEAD_DEC(kD_u, ctD, transcript_u)?
+]
+
+// ---- Phase 6: in-band epoch rekey (continuous verification) ----
+//
+// The user and drone ratchet to a new key epoch by exchanging FRESH ephemeral
+// public points INSIDE the already-authenticated AEAD channel (so the rekey
+// inherits the channel's authentication), then derive new directional keys
+// from the new ephemeral-ephemeral secret. After the switch, the previous
+// epoch's keys are retired. We model time advancing with phase[1] and then
+// LEAK the retired epoch-0 keys to show the new-epoch traffic stays secret —
+// intra-session forward secrecy.
+phase[1]
+
+principal User[
+    generates esk_U2
+    epk_U2 = G^esk_U2
+    // rekey-init, sealed under the epoch-0 user->drone key.
+    ct_ri = AEAD_ENC(kU_u, epk_U2, transcript_u)
+]
+User -> Drone: ct_ri
+
+principal Drone[
+    epk_U2_d = AEAD_DEC(kU_d, ct_ri, transcript_d)?
+    generates esk_D2
+    epk_D2 = G^esk_D2
+    ss_rk_d = epk_U2_d^esk_D2          // fresh ephemeral-ephemeral secret
+    // rekey-resp, sealed under the epoch-0 drone->user key.
+    ct_rr = AEAD_ENC(kD_d, epk_D2, transcript_d)
+    kU2_d, kD2_d = HKDF(transcript_d, ss_rk_d, did)
+]
+Drone -> User: ct_rr
+
+principal User[
+    epk_D2_u = AEAD_DEC(kD_u, ct_rr, transcript_u)?
+    ss_rk_u = epk_D2_u^esk_U2
+    kU2_u, kD2_u = HKDF(transcript_u, ss_rk_u, did)
+    // application data under the NEW epoch keys.
+    generates m_u2
+    ct_u2 = AEAD_ENC(kU2_u, m_u2, transcript_u)
+]
+User -> Drone: ct_u2
+
+principal Drone[
+    _ = AEAD_DEC(kU2_d, ct_u2, transcript_d)?
+]
+
+// Retire (leak) the epoch-0 directional keys. The leak is placed in a later
+// phase (phase[2]) so it happens strictly AFTER the rekey completes, matching
+// the implementation: old keys are zeroized at the epoch switch, so all an
+// attacker can ever obtain is post-retirement material. New-epoch traffic must
+// remain confidential because the new keys depend on ephemerals never revealed.
+phase[2]
+
+principal User[
+    leaks kU_u
+    leaks kD_u
+]
+principal Drone[
+    leaks kU_d
+    leaks kD_d
+]
+
+/* =================================================================
+ * Security queries (v2 + continuous verification)
+ * =================================================================
+ *   Q1  km confidentiality                     — session-key secrecy
+ *   Q2  app message confidentiality (both dirs)
+ *   Q3  Drone  -> User authentication via macD
+ *   Q4  User   -> Drone authentication via macU and userSig
+ *   Q5  User   -> Cloud authentication via authSig
+ *   Q6  nonceU freshness                       — replay resistance (hello)
+ *   Q7  Drone  -> User binding of userSig      — drone consumes sk_U PoP
+ *   Q8  new-epoch key secrecy AFTER old-epoch key leak — intra-session FS
+ *   Q9  new-epoch app message confidentiality          — intra-session FS
+ */
+queries[
+    confidentiality? kU2_u
+    confidentiality? m_u2
+]

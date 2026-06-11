@@ -1,0 +1,53 @@
+# CI for the LiteZero reference simulator.
+#
+# Runs on every push / PR:
+#   1. typecheck (tsc --noEmit)
+#   2. dead-secret static lint (every secret zeroized or exempted with reason)
+#   3. the full 19-scenario attack battery (must defend every attack)
+#   4. the 21-scenario capability matrix
+#   5. MAVLink codec self-test
+#   6. a short microbenchmark pass (1k trials, smoke only — full 10k trials
+#      are reproduced offline via scripts/reproduce.sh)
+#
+# Node version is pinned to .nvmrc for reproducibility.
+
+name: litezero-sim
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use pinned Node version
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Typecheck
+        run: npx --yes -p typescript@5 -p @types/node@24 tsc --noEmit
+
+      - name: Dead-secret lint
+        run: node --experimental-transform-types --no-warnings scripts/dead-secret-lint.ts
+
+      - name: Attack battery (all 19 scenarios must be defended)
+        run: node --experimental-transform-types --no-warnings scripts/run-attacks.ts
+
+      - name: Capability matrix (all 21 scenarios must be defended)
+        run: node --experimental-transform-types --no-warnings scripts/run-capability-matrix.ts
+
+      - name: MAVLink codec self-test
+        run: node --experimental-transform-types --no-warnings scripts/mavlink-selftest.ts
+
+      - name: Microbenchmark smoke test
+        env:
+          BENCH_TRIALS: 1000
+          BENCH_SEED: "0xC0FFEE"
+        run: node --experimental-transform-types --no-warnings scripts/bench.ts

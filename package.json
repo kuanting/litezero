@@ -1,0 +1,29 @@
+{
+  "name": "litezero-sim",
+  "version": "0.2.0",
+  "private": true,
+  "license": "CC-BY-NC-4.0",
+  "description": "Reference simulator and attack battery for LiteZero — a provably secure hardware-anchored AKE for MAVLink-based zero-trust Internet of Drones.",
+  "type": "module",
+  "scripts": {
+    "demo": "node --experimental-transform-types --no-warnings scripts/run-demo.ts",
+    "demo:ws": "node --experimental-transform-types --no-warnings scripts/run-demo-ws.ts",
+    "demo:mavlink": "node --experimental-transform-types --no-warnings scripts/run-mavlink-demo.ts",
+    "mavlink:test": "node --experimental-transform-types --no-warnings scripts/mavlink-selftest.ts",
+    "mavlink:interop": "python3 tools/mavlink_interop_check.py",
+    "attack": "node --experimental-transform-types --no-warnings scripts/run-attacks.ts",
+    "matrix": "node --experimental-transform-types --no-warnings scripts/run-capability-matrix.ts",
+    "lint:secrets": "node --experimental-transform-types --no-warnings scripts/dead-secret-lint.ts",
+    "bench": "node --experimental-transform-types --no-warnings scripts/bench.ts",
+    "bench:bun": "bun scripts/bench.ts",
+    "reproduce": "bash scripts/reproduce.sh",
+    "typecheck": "tsc --noEmit",
+    "verifpal": "for m in auth secrecy fs; do verifpal verify models/litezero-$m.vp || exit 1; done",
+    "test": "node --experimental-transform-types --no-warnings scripts/run-attacks.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "engines": {
+    "node": ">=22.7"
+  }
+}

@@ -1,0 +1,49 @@
+attacker[active]
+principal Cloud[
+    knows private sk_C
+    pk_C = G^sk_C
+]
+principal User[
+    knows private sk_U
+    pk_U = G^sk_U
+]
+principal Drone[
+    knows private d_D
+    pk_D_static = G^d_D
+]
+Cloud -> User: [pk_C]
+Cloud -> Drone: [pk_C]
+User -> Cloud: [pk_U]
+User -> Drone: [pk_U]
+Drone -> Cloud: [pk_D_static]
+
+principal User[
+    generates esk_U
+    generates nonceU
+    knows public uid, did, ts
+    epk_U = G^esk_U
+    authSig = SIGN(sk_U, HASH(uid, did, nonceU, ts))
+]
+User -> Cloud: nonceU, authSig
+principal Cloud[
+    knows public uid, did, ts
+    _ = SIGNVERIF(pk_U, HASH(uid, did, nonceU, ts), authSig)?
+    generates iat, exp
+    token = CONCAT(CONCAT(uid, did, nonceU, iat, exp), pk_U, pk_D_static)
+    sigC = SIGN(sk_C, token)
+]
+Cloud -> User: token, sigC
+principal User[
+    _ = SIGNVERIF(pk_C, token, sigC)?
+    hello_digest = HASH(token, epk_U, nonceU)
+    userSig = SIGN(sk_U, hello_digest)
+]
+User -> Drone: token, sigC, epk_U, nonceU, userSig
+principal Drone[
+    _ = SIGNVERIF(pk_C, token, sigC)?
+    _ = SIGNVERIF(pk_U, HASH(token, epk_U, nonceU), userSig)?
+]
+queries[
+    authentication? User -> Drone: userSig
+    authentication? User -> Cloud: authSig
+]
