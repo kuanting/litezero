@@ -32,7 +32,11 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Typecheck
-        run: npx --yes -p typescript@5 -p @types/node@24 tsc --noEmit
+        # Install the type-checker into an ephemeral, gitignored node_modules so
+        # tsc can resolve @types/node (compilerOptions.types: ["node"]). --no-save
+        # keeps package.json/lock untouched, so the committed repo stays
+        # zero-dependency. node_modules is never committed (.gitignore).
+        run: npm i --no-save typescript@5 @types/node@24 && npx tsc --noEmit
 
       - name: Dead-secret lint
         run: node --experimental-transform-types --no-warnings scripts/dead-secret-lint.ts
