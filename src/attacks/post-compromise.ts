@@ -27,11 +27,11 @@ export async function attackPostCompromise(): Promise<AttackResult> {
     passwordHash: "",
     verifyKeyJwk: exportPublicJwk(rotated.publicKey),
   });
-  // Under Option A the drone authenticates against a PINNED owner key, so the
+  // Under Option A the drone authenticates against a PINNED user key, so the
   // recovery flow must also re-provision the drone with the new key (the
   // in-depot re-enrollment step). This strictly strengthens PCS: even if the
   // attacker could somehow present the old key, the drone now pins the new one.
-  h.reprovisionDroneOwner(h.userIdentity.userId, rotated.publicKey);
+  h.reprovisionUserKey(h.userIdentity.userId, rotated.publicKey);
 
   // Attacker tries to authorize using the OLD signing key. Cloud must refuse.
   let attackerGotToken = true;

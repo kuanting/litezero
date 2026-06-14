@@ -33,7 +33,7 @@ function isAuthToken(x: unknown): x is AuthToken {
     // userVerifyKeyJwk must be present (object); we check structure on import.
     typeof t.userVerifyKeyJwk === "object" && t.userVerifyKeyJwk !== null &&
     // dronePubKey must be present as a b64 string. Note: it is the user's
-    // operator-PINNED P_D (cross-checked against this field), not the token
+    // owner-PINNED P_D (cross-checked against this field), not the token
     // copy alone, that authenticates the drone's static key under Option A.
     typeof t.dronePubKey === "string"
   );

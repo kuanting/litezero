@@ -53,9 +53,9 @@ export function helloSigDigest(
 }
 
 /**
- * Digest an operator signs (offline) to certify a drone's long-term identity
+ * Digest the owner signs (offline) to certify a drone's long-term identity
  * (droneId, P_D). The user pins P_D by verifying this certificate against the
- * operator's trust-anchor key at provisioning, so a forged cloud token cannot
+ * owner's trust-anchor key at provisioning, so a forged cloud token cannot
  * substitute a different P_D — closing the drone-substitution path under a
  * stolen sk_C. Domain-separated from helloSigDigest.
  */

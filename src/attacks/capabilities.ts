@@ -297,7 +297,7 @@ export const EXPECTED_DEFENSES: ExpectedDefense[] = [
     goal: "G2_mutual_auth",
     rationale:
       "Stolen sk_C lets the attacker mint any token (even one advertising its " +
-      "own pk_U), but the drone checks sigma_U against the PINNED owner key, " +
+      "own pk_U), but the drone checks sigma_U against the PINNED user key, " +
       "not the token's key, so without sk_U no forged hello is accepted.",
   },
   {
@@ -325,7 +325,7 @@ export const EXPECTED_DEFENSES: ExpectedDefense[] = [
     capabilities: ["rogue_peer", "observe_transit"],
     goal: "G2_mutual_auth",
     rationale:
-      "The user uses the operator-PINNED P_D and rejects any token whose " +
+      "The user uses the owner-PINNED P_D and rejects any token whose " +
       "dronePubKey disagrees, so a rogue drone's P_D' = d_D' * G is refused " +
       "even if the cloud (or a stolen sk_C) signs a token over it.",
   },

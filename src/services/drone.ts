@@ -43,7 +43,7 @@ export interface DroneConfig {
   pufSeed: PufSeed;
   cloudVerifyKey: KeyObject;
   /**
-   * Owner / allowed-operator verify keys, PINNED on the drone at provisioning
+   * Authorized-user verify keys, PINNED on the drone by the offline owner at provisioning
    * (Option A). The drone verifies the user's hello signature sigma_U against
    * the pinned key for the token's userId — NOT against
    * authToken.userVerifyKeyJwk. This is what makes a stolen sk_C insufficient
@@ -51,10 +51,10 @@ export interface DroneConfig {
    * its own pk_U inside it, but the drone ignores the token's key and checks
    * the pinned one, so the attacker must also hold the real sk_U.
    *
-   * Mutable so the operator can re-provision (rotate) an owner key after a
+   * Mutable so the owner can re-provision (rotate) a user key after a
    * user-key compromise; see the post-compromise scenario.
    */
-  ownerVerifyKeys: Map<string, KeyObject>;
+  authorizedUserKeys: Map<string, KeyObject>;
   /** Called when a plaintext command arrives from the user. */
   onCommand?: (payload: Buffer, reply: (resp: Buffer) => void) => void;
 }
@@ -182,17 +182,17 @@ class DroneSession {
     }
 
     // Step 2: verify the user's PoP signature sigma_U over (tok || E_U || n_U)
-    // against the PINNED owner key for this userId (Option A). We deliberately
+    // against the PINNED user key for this userId (Option A). We deliberately
     // do NOT trust authToken.userVerifyKeyJwk for authentication: under a
     // stolen sk_C, an attacker can mint a cloud-signed token that advertises
-    // its own pk_U. Pinning the operator key at provisioning means the drone
+    // its own pk_U. Pinning the user key at provisioning means the drone
     // checks sigma_U against the key it was provisioned with, so the attacker
     // must also hold the real sk_U — a cloud-key compromise alone cannot
     // command the drone. (The token's userVerifyKeyJwk is now only an
     // authorization-layer convenience for the cloud's own records.)
-    const pinnedKey = this.cfg.ownerVerifyKeys.get(msg.authToken.userId);
+    const pinnedKey = this.cfg.authorizedUserKeys.get(msg.authToken.userId);
     if (!pinnedKey) {
-      return this.abort("user not provisioned as an operator of this drone");
+      return this.abort("user not provisioned as an authorized user of this drone");
     }
     const userPub = Buffer.from(msg.userPub, "base64");
     const nonceU = Buffer.from(msg.nonceU, "base64");

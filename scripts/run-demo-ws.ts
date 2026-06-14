@@ -43,7 +43,7 @@ async function main() {
     policy: { allowedUsers: ["alice"] },
   });
 
-  // Option A provisioning: user pins the drone's P_D; drone pins the owner key.
+  // Option A provisioning: user pins the drone's P_D; drone pins the user key.
   const identity: UserIdentity = {
     userId: "alice",
     signingKey: userKey.privateKey,
@@ -57,7 +57,7 @@ async function main() {
       droneId: "drone-alpha",
       pufSeed: seed,
       cloudVerifyKey: cloud.cloudKey.publicKey,
-      ownerVerifyKeys: new Map([["alice", userKey.publicKey]]),
+      authorizedUserKeys: new Map([["alice", userKey.publicKey]]),
       onCommand: (pt, reply) =>
         reply(Buffer.concat([Buffer.from("ACK:", "utf8"), pt])),
     },

@@ -41,7 +41,7 @@ export class CloudService {
 
   /**
    * Rotate a user's verification key. Used for post-compromise recovery:
-   * the operator publishes a fresh public key, and subsequent authorization
+   * the owner publishes a fresh public key, and subsequent authorization
    * requests must be signed by the matching new private key. Requests
    * signed by the old key will fail verification in `authorize`.
    */
@@ -100,8 +100,8 @@ export class CloudService {
     // The token carries userVerifyKeyJwk and dronePubKey as an AUTHORIZATION-
     // LAYER convenience (so the cloud's own records travel with the grant).
     // They are NOT the authentication roots: under Option A the drone verifies
-    // sigma_U against the owner key it was PINNED with at provisioning, and the
-    // user uses the drone's P_D PINNED against the offline operator anchor.
+    // sigma_U against the user key it was PINNED with at provisioning, and the
+    // user uses the drone's P_D PINNED against the offline owner anchor.
     // This matters because the cloud is only honest-but-vulnerable: a stolen
     // sk_C lets an attacker mint a token advertising its own pk_U or a bogus
     // P_D, but the pinned keys on the endpoints reject both. The cloud thus

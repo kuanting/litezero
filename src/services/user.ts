@@ -39,7 +39,7 @@ export interface UserIdentity {
   signingKey: KeyObject;
   /**
    * Drone long-term public keys (P_D) the user PINNED at provisioning, each
-   * verified offline against the operator's trust-anchor signature (Option A),
+   * verified offline against the owner's trust-anchor signature (Option A),
    * keyed by droneId. When present for the target drone, the user uses the
    * pinned P_D for the static-ephemeral branch and rejects a cloud token whose
    * dronePubKey disagrees — closing the drone-substitution path under a stolen
@@ -183,8 +183,8 @@ export async function runUserHandshake(params: {
   // the handshake by providing its own E_D — which is precisely the flaw the
   // reviewer flagged. Z = Z_1 || Z_2 closes that gap by reducing to Gap-DH on
   // either branch being hard (see §V in the paper).
-  // Determine the drone's static pub key P_D from the operator-PINNED record
-  // (Option A): it was verified offline against the operator trust anchor at
+  // Determine the drone's static pub key P_D from the owner-PINNED record
+  // (Option A): it was verified offline against the owner trust anchor at
   // provisioning, so it does not depend on the cloud. Pinning is MANDATORY
   // (Algorithm 1 step 13) — there is no fallback to the token's P_D, because
   // under a stolen sk_C a forged token could advertise a bogus P_D and lure an
@@ -195,13 +195,13 @@ export async function runUserHandshake(params: {
   if (!pinnedDronePub) {
     link.close();
     throw new Error(
-      "no operator-pinned P_D for this drone — refusing unpinned handshake",
+      "no owner-pinned P_D for this drone — refusing unpinned handshake",
     );
   }
   if (!timingSafeEqual(pinnedDronePub, tokenDronePub)) {
     link.close();
     throw new Error(
-      "drone pubkey mismatch — token P_D differs from operator-pinned P_D",
+      "drone pubkey mismatch — token P_D differs from owner-pinned P_D",
     );
   }
   const dronePubStatic = pinnedDronePub;

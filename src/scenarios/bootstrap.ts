@@ -33,11 +33,11 @@ export interface Harness {
   droneServer: TransportServer;
   droneId: string;
   userIdentity: UserIdentity;
-  /** Offline operator trust-anchor public key (Option A root of identity). */
-  operatorVerifyKey: KeyObject;
-  /** Re-provision (rotate) the drone's pinned owner key after a user-key
+  /** Offline owner trust-anchor public key (Option A root of identity). */
+  ownerVerifyKey: KeyObject;
+  /** Re-provision (rotate) the drone's pinned user key after a user-key
    *  compromise. Mirrors the in-depot re-enrollment flow. */
-  reprovisionDroneOwner: (userId: string, verifyKey: KeyObject) => void;
+  reprovisionUserKey: (userId: string, verifyKey: KeyObject) => void;
   connectToDrone: () => Transport;
   shutdown: () => Promise<void>;
 }
@@ -66,10 +66,10 @@ export async function bootstrap(opts?: {
 
   const cloud = new CloudService();
 
-  // Offline operator trust anchor. In a fielded deployment this key is kept
+  // Offline owner trust anchor. In a fielded deployment this key is kept
   // offline; it signs each drone's identity (droneId, P_D) so the user can pin
   // P_D independently of the cloud. It never touches a session.
-  const operator = generateSigningKey();
+  const owner = generateSigningKey();
 
   // User registers.
   const userKey = generateSigningKey();
@@ -91,26 +91,26 @@ export async function bootstrap(opts?: {
   };
   cloud.registerDrone(droneRec);
 
-  // Operator certifies the drone identity offline; the user provisions P_D by
-  // verifying this certificate against the operator trust anchor (Option A).
+  // The owner certifies the drone identity offline; the user provisions P_D by
+  // verifying this certificate against the owner trust anchor (Option A).
   const droneIdCert = signEcdsa(
-    operator.privateKey,
+    owner.privateKey,
     droneIdentityDigest(droneId, droneEcdhPub),
   );
   if (
     !verifyEcdsa(
-      operator.publicKey,
+      owner.publicKey,
       droneIdentityDigest(droneId, droneEcdhPub),
       droneIdCert,
     )
   ) {
-    throw new Error("bootstrap: operator drone-identity cert failed to verify");
+    throw new Error("bootstrap: owner drone-identity cert failed to verify");
   }
   const pinnedDrones = new Map<string, Buffer>([[droneId, droneEcdhPub]]);
 
-  // Owner keys PINNED on the drone at provisioning (Option A). Mutable so the
-  // operator can rotate an owner key on re-enrollment.
-  const ownerVerifyKeys = new Map<string, KeyObject>([
+  // Authorized-user keys PINNED on the drone at provisioning (Option A).
+  // Mutable so the owner can rotate a user key on re-enrollment.
+  const authorizedUserKeys = new Map<string, KeyObject>([
     [userId, userKey.publicKey],
   ]);
 
@@ -122,7 +122,7 @@ export async function bootstrap(opts?: {
       droneId,
       pufSeed: droneSeed,
       cloudVerifyKey: cloud.cloudKey.publicKey,
-      ownerVerifyKeys,
+      authorizedUserKeys,
       onCommand: opts?.onCommand ?? ((pt, reply) => {
         reply(Buffer.concat([Buffer.from("ACK:", "utf8"), pt]));
       }),
@@ -144,9 +144,9 @@ export async function bootstrap(opts?: {
     droneServer,
     droneId,
     userIdentity: identity,
-    operatorVerifyKey: operator.publicKey,
-    reprovisionDroneOwner: (uid, verifyKey) => {
-      ownerVerifyKeys.set(uid, verifyKey);
+    ownerVerifyKey: owner.publicKey,
+    reprovisionUserKey: (uid, verifyKey) => {
+      authorizedUserKeys.set(uid, verifyKey);
     },
     connectToDrone: () => inProcessConnect(droneServer.endpoint()),
     shutdown: async () => {

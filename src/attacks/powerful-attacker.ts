@@ -119,9 +119,9 @@ export async function attackPowerfulAttacker(): Promise<AttackResult> {
   // sigma_U successfully, so reaches key derivation. BUT: the session
   // opens against a user identity that is NOT alice. The drone's
   // policy layer (in a real deployment) would have a paired user record
-  // that would reject this at the operator-policy step. We test whether
+  // that would reject this at the owner-policy step. We test whether
   // the drone accepts such a hello; if yes, mutual auth G2 technically
-  // "breaks" but the operator-policy layer is supposed to catch it in
+  // "breaks" but the owner-policy layer is supposed to catch it in
   // production. This scenario records that nuance.
   const fakeUser = generateSigningKey();
   const substitutedToken: AuthToken = {
@@ -184,7 +184,7 @@ export async function attackPowerfulAttacker(): Promise<AttackResult> {
   //  A defended iff drone rejects at sigma_U.
   //  B defended iff drone rejects at sigma_U (random sig).
   //  C defended iff drone rejects the substituted user key: under Option A
-  //    the drone verifies sigma_U against the owner verify key pinned at
+  //    the drone verifies sigma_U against the user verify key pinned at
   //    provisioning, NOT against the token's userVerifyKeyJwk, so a rogue
   //    token carrying pk_U'=attacker fails even though sigma_U verifies
   //    under pk_U'. A stolen sk_C is an authorization-only capability.
@@ -197,7 +197,7 @@ export async function attackPowerfulAttacker(): Promise<AttackResult> {
     `A[tampered-replay]=${rA ?? "accepted"}; ` +
     `B[rogue-token-random-sig]=${rB ?? "accepted"}; ` +
     `C[substituted-pk_U, sigma_U valid]=${rC ?? "accepted"} ` +
-    `(rejected by the provisioning-pinned owner verify key)`;
+    `(rejected by the provisioning-pinned user verify key)`;
 
   return {
     name: "powerful-attacker (sk_C + cloud-db + replay + tamper)",

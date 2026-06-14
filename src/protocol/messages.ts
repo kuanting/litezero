@@ -50,7 +50,7 @@ export interface AuthToken {
   /**
    * User's ECDSA verify key, copied into the token by the cloud as an
    * AUTHORIZATION-layer convenience. NOT the authentication root: under
-   * Option A the drone verifies sigma_U against the owner key it was PINNED
+   * Option A the drone verifies sigma_U against the user key it was PINNED
    * with at provisioning, so a stolen sk_C cannot substitute the attacker's
    * own pk_U here and command the drone.
    */
@@ -58,7 +58,7 @@ export interface AuthToken {
   /**
    * Drone's long-term ECDH public point P_D = d_D * G. Travels in the token as
    * a convenience, but the user authenticates P_D against the value it PINNED
-   * at provisioning (verified offline under the operator trust anchor), and
+   * at provisioning (verified offline under the owner trust anchor), and
    * rejects the token if they disagree. A stolen sk_C therefore cannot
    * substitute a bogus P_D to lure the user onto a fake drone.
    */
@@ -71,8 +71,8 @@ export interface SignedAuthToken {
   cloudVerifyKeyJwk: unknown; // convenience
   /**
    * Non-authoritative convenience copy of P_D, OUTSIDE the cloud signature.
-   * Endpoints must use their pinned values (operator-anchored P_D on the user,
-   * pinned owner key on the drone); never trust this field for crypto. Kept
+   * Endpoints must use their pinned values (owner-anchored P_D on the user,
+   * pinned user key on the drone); never trust this field for crypto. Kept
    * only so the HTTP demo can echo it. (Redundant with token.dronePubKey.)
    */
   dronePubKey: B64;
@@ -91,7 +91,7 @@ export interface HandshakeHello {
   /**
    * User's proof-of-possession signature: ECDSA_{sk_U}(H("lz/hello/v1" ||
    * canonicalToken(authToken) || userPub || nonceU)). The drone verifies this
-   * against the owner key it was PINNED with at provisioning (Option A), not
+   * against the user key it was PINNED with at provisioning (Option A), not
    * against authToken.userVerifyKeyJwk, before computing any keys. So even an
    * attacker who steals sk_C and mints tokens at will cannot produce a hello
    * the drone accepts without also holding the real sk_U.

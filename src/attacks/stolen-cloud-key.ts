@@ -6,12 +6,12 @@
 // (b) lure a legitimate user onto a drone of the attacker's choosing.
 //
 // Defense (Option A — keys PINNED at provisioning, independent of the cloud):
-//   (a) The drone verifies sigma_U against the OWNER key it was provisioned
+//   (a) The drone verifies sigma_U against the USER key it was provisioned
 //       with, not against authToken.userVerifyKeyJwk. A forged token that
 //       advertises the attacker's own pk_U is therefore rejected: the attacker
 //       lacks the real sk_U and cannot produce a sigma_U the pinned key accepts.
 //   (b) The user uses the drone's P_D PINNED at provisioning (verified offline
-//       against the operator trust anchor), and rejects a token whose
+//       against the owner trust anchor), and rejects a token whose
 //       dronePubKey disagrees. A forged token that substitutes Q_D' is caught.
 //
 // A stolen sk_C is thus confined to the authorization layer (it changes who is
@@ -61,7 +61,7 @@ export async function attackStolenCloudKey(): Promise<AttackResult> {
   // ---- (a) user-key substitution: try to COMMAND the drone -----------------
   // Attacker mints a token advertising its OWN pk_U and signs the hello with
   // the matching sk_U'. A naive (Option B) drone that trusted the token's key
-  // would accept. The pinned-owner-key drone must reject.
+  // would accept. The pinned-user-key drone must reject.
   const fakeUser = generateSigningKey();
   const tokA: AuthToken = {
     userId: h.userIdentity.userId,
@@ -88,12 +88,12 @@ export async function attackStolenCloudKey(): Promise<AttackResult> {
   } catch (e) {
     errA = (e as Error).message;
   }
-  const defendedA = errA !== null && /user signature|operator/i.test(errA);
+  const defendedA = errA !== null && /user signature|authorized user/i.test(errA);
 
   // ---- (b) drone-key substitution: try to LURE the user to a fake drone ----
   // Attacker mints a token (for the real user) whose dronePubKey is a Q_D' it
   // controls. The legit user signs the hello with the real sk_U, but must
-  // refuse because the token's P_D disagrees with the operator-pinned P_D.
+  // refuse because the token's P_D disagrees with the owner-pinned P_D.
   const rogueDronePub = ephemeralEcdh().pub.toString("base64"); // attacker Q_D'
   const tokB: AuthToken = {
     userId: h.userIdentity.userId,

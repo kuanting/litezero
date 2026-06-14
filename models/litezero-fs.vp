@@ -37,9 +37,9 @@ principal Drone[
 
 // ---- Enrollment / provisioning (authentic, out-of-band) ----
 // Guarded constants [x]: the attacker can observe but not substitute them.
-// [pk_U] -> Drone is the Option A owner verify key pinned at provisioning;
-// [pk_D_static] -> User is the operator-verified pinned P_D. Both mirror
-// src/services/drone.ts (ownerVerifyKeys) and src/services/user.ts
+// [pk_U] -> Drone is the Option A user verify key pinned at provisioning;
+// [pk_D_static] -> User is the owner-verified pinned P_D. Both mirror
+// src/services/drone.ts (authorizedUserKeys) and src/services/user.ts
 // (pinnedDrones).
 Cloud -> User: [pk_C]
 Cloud -> Drone: [pk_C]
@@ -94,7 +94,7 @@ principal Drone[
     knows public uid, did
     // (1) Cloud signature
     _ = SIGNVERIF(pk_C, token, cloudSig)?
-    // (2) User PoP signature — verified against the owner verify key pk_U
+    // (2) User PoP signature — verified against the user verify key pk_U
     // PINNED at provisioning (Option A); the token's copy is convenience.
     hello_digest_d = HASH(token, epk_U, nonceU)
     _ = SIGNVERIF(pk_U, hello_digest_d, userSig)?
