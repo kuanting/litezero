@@ -7,7 +7,7 @@
 // to test.
 
 import { CloudService } from "../services/cloud.ts";
-import { attachDrone, enrollDrone } from "../services/drone.ts";
+import { attachDrone, enrollDrone, type DroneServerStats } from "../services/drone.ts";
 import type { CloudClient, UserIdentity } from "../services/user.ts";
 import {
   exportPublicJwk,
@@ -17,7 +17,11 @@ import {
   verifyEcdsa,
 } from "../crypto/primitives.ts";
 import { droneIdentityDigest } from "../protocol/litezero.ts";
-import { generatePufSeed, type PufSeed } from "../crypto/puf.ts";
+import {
+  generatePufSeed,
+  type PufSeed,
+  type PufHelperData,
+} from "../crypto/puf.ts";
 import {
   inProcessConnect,
   inProcessListen,
@@ -30,7 +34,18 @@ export interface Harness {
   cloud: CloudService;
   cloudClient: CloudClient;
   droneSeed: PufSeed;
+  /**
+   * The drone's persisted secrets, exposed so attack scenarios can model a
+   * device capture / long-term-key leak. The black key is the PUF-sealed
+   * static ECDH scalar d_D; combined with droneSeed + helper it unseals to the
+   * real d_D exactly as the drone does at handshake time. (These live in
+   * eFuse/flash on a fielded drone.)
+   */
+  blackKey: { iv: Buffer; ct: Buffer; tag: Buffer };
+  helper: PufHelperData;
   droneServer: TransportServer;
+  /** Live server stats (half-open handshake count), for DoS-bound assertions. */
+  droneStats: DroneServerStats;
   droneId: string;
   userIdentity: UserIdentity;
   /** Offline owner trust-anchor public key (Option A root of identity). */
@@ -116,7 +131,7 @@ export async function bootstrap(opts?: {
 
   // Drone transport server.
   const droneServer = inProcessListen();
-  attachDrone(
+  const droneStats = attachDrone(
     droneServer,
     {
       droneId,
@@ -141,7 +156,10 @@ export async function bootstrap(opts?: {
     cloud,
     cloudClient: inProcessCloudClient(cloud),
     droneSeed,
+    blackKey,
+    helper,
     droneServer,
+    droneStats,
     droneId,
     userIdentity: identity,
     ownerVerifyKey: owner.publicKey,

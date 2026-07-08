@@ -12,6 +12,14 @@ export const AUTH_TOKEN_TTL_MS = 30_000;
 // Maximum out-of-order session frames we will accept (sliding window).
 export const SESSION_REPLAY_WINDOW = 64;
 
+// Maximum number of half-open handshakes (hello accepted, ack not yet received)
+// the drone will hold at once. When the bound is reached, the oldest half-open
+// handshake is evicted (its pending key material zeroized and its transport
+// closed) to admit the new one. This caps memory under a half-open flood while
+// never starving a legitimate initiator, which will simply evict a stale
+// attacker slot. A fielded drone would pair this with a per-source rate limit.
+export const MAX_PENDING_HANDSHAKES = 32;
+
 // Domain separation label for our HKDF-based KDF.
 export const KDF_LABEL = "litezero/v1";
 

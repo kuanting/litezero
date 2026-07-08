@@ -91,7 +91,10 @@ User -> Drone: token, cloudSig, epk_U, nonceU, userSig
 
 // ---- Phase 3: Drone verifies sigma_C AND sigma_U, then computes two DH branches ----
 principal Drone[
-    knows public uid, did
+    // master_info / drone_label / user_label are the fixed ASCII
+    // domain-separation constants used by the implementation
+    // ("litezero/v1/master", "drone", "user"); modelled as public constants.
+    knows public uid, did, master_info, drone_label, user_label
     // (1) Cloud signature
     _ = SIGNVERIF(pk_C, token, cloudSig)?
     // (2) User PoP signature — verified against the user verify key pk_U
@@ -106,32 +109,35 @@ principal Drone[
     ss2_d = epk_U^d_D         // Z_2 = d_D * E_U  (static-ephemeral, PUF branch)
     ikm_d = CONCAT(ss1_d, ss2_d)
     salt_d = CONCAT(nonceU, nonceD)
-    info_d = CONCAT(uid, did, token)
-    km_d, kU_d, kD_d = HKDF(salt_d, ikm_d, info_d)
-    // Transcript now covers userSig as well.
-    transcript_d = CONCAT(CONCAT(token, epk_U, nonceU, userSig), epk_D, nonceD)
-    macD = MAC(km_d, CONCAT(transcript_d, did))
+    // HKDF info is the fixed master label, matching deriveSessionKeys in
+    // src/protocol/litezero.ts (info = "litezero/v1/master").
+    km_d, kU_d, kD_d = HKDF(salt_d, ikm_d, master_info)
+    // Transcript matches transcriptHash in src/protocol/litezero.ts exactly:
+    // token || cloudSig || E_U || nonceU || userSig || E_D || nonceD.
+    transcript_d = CONCAT(CONCAT(token, cloudSig, epk_U, nonceU, userSig), epk_D, nonceD)
+    // MAC domain labels are the literal strings "drone"/"user" (macWithLabel).
+    macD = MAC(km_d, CONCAT(transcript_d, drone_label))
 ]
 Drone -> User: epk_D, nonceD, macD
 
 // ---- Phase 4: User completes the handshake using BOTH branches ----
 principal User[
+    knows public master_info, drone_label, user_label
     // Z_1 user side = e_U * E_D; Z_2 user side = e_U * P_D_static.
     ss1_u = epk_D^esk_U
     ss2_u = pk_D_static^esk_U
     ikm_u = CONCAT(ss1_u, ss2_u)
     salt_u = CONCAT(nonceU, nonceD)
-    info_u = CONCAT(uid, did, token)
-    km_u, kU_u, kD_u = HKDF(salt_u, ikm_u, info_u)
-    transcript_u = CONCAT(CONCAT(token, epk_U, nonceU, userSig), epk_D, nonceD)
-    macD_u = MAC(km_u, CONCAT(transcript_u, did))
+    km_u, kU_u, kD_u = HKDF(salt_u, ikm_u, master_info)
+    transcript_u = CONCAT(CONCAT(token, cloudSig, epk_U, nonceU, userSig), epk_D, nonceD)
+    macD_u = MAC(km_u, CONCAT(transcript_u, drone_label))
     _ = ASSERT(macD, macD_u)?
-    macU = MAC(km_u, CONCAT(transcript_u, uid))
+    macU = MAC(km_u, CONCAT(transcript_u, user_label))
 ]
 User -> Drone: macU
 
 principal Drone[
-    macU_d = MAC(km_d, CONCAT(transcript_d, uid))
+    macU_d = MAC(km_d, CONCAT(transcript_d, user_label))
     _ = ASSERT(macU, macU_d)?
 ]
 

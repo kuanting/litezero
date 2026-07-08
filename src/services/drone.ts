@@ -34,7 +34,8 @@ import type {
   SessionFrame,
   WireMessage,
 } from "../protocol/messages.ts";
-import { SESSION_REPLAY_WINDOW } from "../config.ts";
+import { parseMessage } from "../protocol/parser.ts";
+import { MAX_PENDING_HANDSHAKES, SESSION_REPLAY_WINDOW } from "../config.ts";
 import type { KeyObject } from "node:crypto";
 import type { Transport, TransportServer } from "../transport/types.ts";
 
@@ -120,12 +121,24 @@ interface PendingSession {
   scope: string[];
 }
 
+/**
+ * Bounded registry of half-open handshakes shared across all connections to a
+ * drone. `admit` registers a newly half-open session, evicting the oldest when
+ * the bound is exceeded; `retire` removes one that has opened or gone away.
+ */
+interface HalfOpenRegistry {
+  admit(sess: DroneSession): void;
+  retire(sess: DroneSession): void;
+}
+
 class DroneSession {
   state: SessionState | null = null;
   private pendingTranscript: Buffer | null = null;
   private pendingKm: Buffer | null = null;
   /** Session material derived in handleHello but not released until tau_U verifies. */
   private pendingSession: PendingSession | null = null;
+  /** True while this session occupies a half-open slot in the registry. */
+  private slotHeld = false;
 
   constructor(
     private cfg: DroneConfig,
@@ -140,6 +153,8 @@ class DroneSession {
      * two scalar multiplications on it.
      */
     private seenHelloNonces: Map<string, number>,
+    /** Bounded half-open registry shared across connections. */
+    private halfOpen: HalfOpenRegistry,
   ) {}
 
   handleMessage(msg: WireMessage): void {
@@ -168,6 +183,13 @@ class DroneSession {
     }
     if (Date.now() > msg.authToken.exp) return this.abort("auth token expired");
     if (msg.authToken.droneId !== this.cfg.droneId) return this.abort("wrong drone");
+    // The hello carries nonceU twice: once cloud-signed inside the token and
+    // once at the top level (bound by sigma_U). They must be the same value so
+    // the freshness the cloud authorized is exactly the freshness the user
+    // signed over; reject any hello that tries to desync them.
+    if (msg.nonceU !== msg.authToken.nonceU) {
+      return this.abort("hello nonce does not match token");
+    }
 
     // Single-use check: each cloud-signed token binds a fresh nonceU, and the
     // drone accepts a given nonceU at most once within its TTL. This stops
@@ -230,7 +252,6 @@ class DroneSession {
     // secret to be unpredictable — see Theorem 1 in the paper.
     const staticEcdh = createECDH("prime256v1");
     staticEcdh.setPrivateKey(dScalar);
-    const dronePubStatic = staticEcdh.getPublicKey();
     const ephEcdh = createECDH("prime256v1");
     const dronePub = ephEcdh.generateKeys();
     let z1: Buffer, z2: Buffer;
@@ -247,7 +268,6 @@ class DroneSession {
     z1.fill(0);
     z2.fill(0);
 
-    void dronePubStatic; // (static pub is published via the cloud, not in finish)
     const nonceD = randBytes(16);
     const { km, kU2D, kD2U } = deriveSessionKeys(ikm, nonceU, nonceD);
     ikm.fill(0);
@@ -274,6 +294,7 @@ class DroneSession {
     // Keys stay PENDING until the user's tau_U verifies in handleAck: the
     // session opens only after explicit key confirmation (Algorithm 1 step 16),
     // so no data frame is ever decrypted on a half-open handshake.
+    if (this.pendingKm) this.pendingKm.fill(0); // defensively wipe a prior half-open on this conn
     this.pendingTranscript = transcript;
     this.pendingKm = km;
     this.pendingSession = {
@@ -284,6 +305,13 @@ class DroneSession {
       baseTranscript: transcript,
       scope: msg.authToken.policy.scope,
     };
+    // Register this half-open handshake. The registry bounds how many the drone
+    // holds at once, evicting the oldest under a flood, so pending state cannot
+    // grow without bound while a valid ack is still awaited.
+    if (!this.slotHeld) {
+      this.slotHeld = true;
+      this.halfOpen.admit(this);
+    }
   }
 
   private handleAck(msg: HandshakeAck): void {
@@ -292,6 +320,10 @@ class DroneSession {
     }
     const expected = macWithLabel(this.pendingKm, this.pendingTranscript, "user");
     if (!timingSafeEqual(expected, Buffer.from(msg.macU, "base64"))) {
+      // Confirmation failed: this handshake will never open. Zeroize the
+      // pending session material before tearing down so a failed/forged ack
+      // cannot leave derived keys lingering in memory.
+      this.wipePending();
       return this.abort("user mac invalid");
     }
     const p = this.pendingSession;
@@ -309,10 +341,60 @@ class DroneSession {
       scope: p.scope,
       policyTs: 0,
     };
+    // Keys transferred into `state`; drop the pending handles (their buffers
+    // are now aliased by `state`, so do NOT zeroize them here). The handshake
+    // is no longer half-open, so free its registry slot.
     this.pendingTranscript = null;
     this.pendingKm.fill(0);
     this.pendingKm = null;
     this.pendingSession = null;
+    this.retireSlot();
+  }
+
+  /** Free this session's half-open registry slot, at most once. */
+  private retireSlot(): void {
+    if (this.slotHeld) {
+      this.slotHeld = false;
+      this.halfOpen.retire(this);
+    }
+  }
+
+  /** Zeroize any half-open handshake material that never opened a session. */
+  private wipePending(): void {
+    this.pendingTranscript = null;
+    if (this.pendingKm) {
+      this.pendingKm.fill(0);
+      this.pendingKm = null;
+    }
+    if (this.pendingSession) {
+      this.pendingSession.kU2D.fill(0);
+      this.pendingSession.kD2U.fill(0);
+      this.pendingSession = null;
+    }
+    this.retireSlot();
+  }
+
+  /**
+   * Evicted by the registry when the drone is holding too many half-open
+   * handshakes: zeroize this stale pending state and close the transport.
+   */
+  evict(): void {
+    this.wipePending();
+    this.link.close();
+  }
+
+  /**
+   * Release all secret material for this connection. Called when the transport
+   * closes so that an abandoned handshake (hello accepted, ack never arrives)
+   * or a torn-down session does not leave session keys resident in memory.
+   */
+  dispose(): void {
+    this.wipePending();
+    if (this.state) {
+      this.state.kU2D.fill(0);
+      this.state.kD2U.fill(0);
+      this.state = null;
+    }
   }
 
   private handleData(msg: SessionFrame): void {
@@ -326,6 +408,9 @@ class DroneSession {
 
     const chan = msg.chan ?? "app";
     const aad = frameAad(this.state.droneId, "u2d", msg.epoch, chan, msg.seq);
+    // @secret-escapes: pt is application-layer plaintext (a command/telemetry
+    // payload), not a key; it is handed to the control handler or onCommand
+    // callback, which owns its lifetime — mirrors the user-side handling.
     let pt: Buffer;
     try {
       pt = aesGcmDecrypt(
@@ -482,27 +567,67 @@ class DroneSession {
   }
 }
 
+/** Handle returned by {@link attachDrone} for observing server-wide state. */
+export interface DroneServerStats {
+  /** Number of half-open handshakes (hello accepted, ack pending) held now. */
+  pendingHandshakes(): number;
+}
+
 /**
  * Attach the drone protocol to a transport server. Every incoming connection
- * gets its own session state.
+ * gets its own session state. Returns a small stats handle for observing
+ * server-wide state (used by tests to assert the half-open bound).
  */
 export function attachDrone(
   server: TransportServer,
   cfg: DroneConfig,
   blackKey: { iv: Buffer; ct: Buffer; tag: Buffer },
   helper: PufHelperData,
-): void {
+): DroneServerStats {
   // Hello-nonce single-use cache, shared by ALL connections to this drone so a
   // hello captured on one connection cannot be replayed on another.
   const seenHelloNonces = new Map<string, number>();
-  server.onConnection((link) => {
-    const sess = new DroneSession(cfg, blackKey, helper, link, seenHelloNonces);
-    link.onMessage((s) => {
-      try {
-        sess.handleMessage(JSON.parse(s) as WireMessage);
-      } catch {
-        link.send(JSON.stringify({ kind: "error", reason: "malformed" }));
+
+  // Bounded half-open registry, shared across connections. A Set preserves
+  // insertion order, so the "oldest" evictable slot is simply the first entry.
+  const halfOpenSet = new Set<DroneSession>();
+  const halfOpen: HalfOpenRegistry = {
+    admit(sess) {
+      if (halfOpenSet.size >= MAX_PENDING_HANDSHAKES) {
+        const oldest = halfOpenSet.values().next().value as DroneSession | undefined;
+        if (oldest) {
+          halfOpenSet.delete(oldest);
+          oldest.evict(); // zeroize its pending material + close its transport
+        }
       }
+      halfOpenSet.add(sess);
+    },
+    retire(sess) {
+      halfOpenSet.delete(sess);
+    },
+  };
+
+  server.onConnection((link) => {
+    const sess = new DroneSession(cfg, blackKey, helper, link, seenHelloNonces, halfOpen);
+    link.onMessage((s) => {
+      // Single strict parsing chokepoint: every inbound byte string is
+      // schema-validated before it reaches the session state machine. A
+      // structurally malformed message (bad JSON, wrong/extra field types,
+      // unknown kind) is rejected here and the transport is closed, so the
+      // handlers below only ever see well-typed messages.
+      const msg = parseMessage(s);
+      if (msg.kind === "error") {
+        link.send(JSON.stringify(msg));
+        link.close();
+        return;
+      }
+      sess.handleMessage(msg);
     });
+    // Zeroize this connection's key material when the transport goes away.
+    link.onClose(() => sess.dispose());
   });
+
+  return {
+    pendingHandshakes: () => halfOpenSet.size,
+  };
 }

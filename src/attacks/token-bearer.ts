@@ -18,8 +18,7 @@
 
 import { bootstrap, inProcessCloudClient } from "../scenarios/bootstrap.ts";
 import { runUserHandshake } from "../services/user.ts";
-import { ephemeralEcdh, randBytes, signEcdsa } from "../crypto/primitives.ts";
-import { canonicalToken, helloSigDigest } from "../protocol/litezero.ts";
+import { ephemeralEcdh, randBytes } from "../crypto/primitives.ts";
 import type { HandshakeHello } from "../protocol/messages.ts";
 import type { AttackResult } from "./types.ts";
 
@@ -62,7 +61,6 @@ export async function attackTokenBearer(): Promise<AttackResult> {
   //   (b) forge sigma_U with a random key — will fail ECDSA verify.
   const attackerEph = ephemeralEcdh();
   const attackerNonce = randBytes(16);
-  const tokenBytes = canonicalToken(heardHello.authToken);
 
   // Strategy (a): splice captured sigma_U
   const spliced: HandshakeHello = {
@@ -100,19 +98,14 @@ export async function attackTokenBearer(): Promise<AttackResult> {
   const resA = await tryHello(spliced);
   const resB = await tryHello(forgedHello);
 
-  // Silence unused
-  void helloSigDigest;
-  void signEcdsa;
-  void tokenBytes;
-
   await h.shutdown();
-  // Defended iff both strategies are rejected with a user-sig-related error.
-  const sigFailRe = /user signature/i;
-  const defended =
-    resA !== null &&
-    resB !== null &&
-    sigFailRe.test(resA) &&
-    sigFailRe.test(resB);
+  // Score on the security outcome, not on a specific abort string: the attack
+  // is defended iff NEITHER strategy opened a session (a null result means the
+  // drone returned a `finish`, i.e. the handshake progressed). Both the
+  // sigma_U verification and the nonce/token binding are legitimate reasons
+  // the drone can refuse; coupling PASS to one exact reason string would make
+  // the test flip on a benign refactor of the abort messages.
+  const defended = resA !== null && resB !== null;
   return {
     name: "bearer-token replay with attacker's own e_U (no sk_U)",
     defended,

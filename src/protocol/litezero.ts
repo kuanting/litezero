@@ -94,26 +94,32 @@ export function transcriptHash(t: TranscriptInput): Buffer {
   );
 }
 
-/** From the ECDH secret + nonces, derive master session key + MAC key. */
+/**
+ * From the ECDH secret + nonces, derive the directional session keys and the
+ * key-confirmation MAC key. The 64-byte HKDF master is split into a session
+ * root (ks) and a MAC key (km); ks seeds the two directional subkeys and is
+ * then discarded. The master (root ks included) is zeroized before returning,
+ * and only an independent copy of km escapes — so the caller only has to wipe
+ * km (and the returned subkeys) when the session ends.
+ */
 export function deriveSessionKeys(
   ecdhSecret: Buffer,
   nonceU: Buffer,
   nonceD: Buffer,
-): { ks: Buffer; km: Buffer; kU2D: Buffer; kD2U: Buffer } {
+): { km: Buffer; kU2D: Buffer; kD2U: Buffer } {
   const salt = Buffer.concat([nonceU, nonceD]);
-  // @secret-escapes: master is a 64-byte HKDF output that is sliced into
-  // ks and km and returned to the caller. The caller's session-key
-  // lifetime governs zeroization — we do not dispose here because
-  // `ks = master.subarray(...)` aliases into master's storage.
   const master = hkdf(ecdhSecret, salt, `${KDF_LABEL}/master`, 64);
   const ks = master.subarray(0, 32);
-  const km = master.subarray(32, 64);
-  return {
-    ks,
-    km,
-    kU2D: deriveSubkey(ks, "u2d"),
-    kD2U: deriveSubkey(ks, "d2u"),
-  };
+  // deriveSubkey runs HKDF again, so the subkeys are independent buffers and
+  // ks itself never needs to leave this function.
+  const kU2D = deriveSubkey(ks, "u2d");
+  const kD2U = deriveSubkey(ks, "d2u");
+  // Copy km out before wiping the master; the copy is the only session secret
+  // that outlives this call besides the directional subkeys.
+  const km = Buffer.from(master.subarray(32, 64));
+  master.fill(0); // zeroizes both ks and the original km bytes
+  salt.fill(0);
+  return { km, kU2D, kD2U };
 }
 
 export function macWithLabel(km: Buffer, transcript: Buffer, label: string): Buffer {

@@ -223,13 +223,14 @@ export async function attackStaleEpochAfterRekey(): Promise<AttackResult> {
 }
 
 /**
- * D. Expired-authorization command. After the token TTL passes mid-session,
- * the drone must refuse application commands until a valid in-band refresh
- * arrives. We force expiry by pushing a refresh with an already-short horizon
- * is not possible (cloud sets TTL), so we simulate elapsed time by sending a
- * command after locally advancing past exp via a revoking policy is separate;
- * here we assert the refresh path RE-ENABLES commands and a tampered refresh is
- * rejected.
+ * D. In-band refresh and forged-policy handling. This scenario checks two
+ * continuous-verification properties on a live session:
+ *   1. a genuine cloud-signed refresh keeps the session usable (commands still
+ *      flow after it), and
+ *   2. a forged (badly-signed) policy push that tries to revoke control scope
+ *      is ignored, so commands keep working.
+ * Both are non-fatal control-plane operations; the session must stay open and
+ * behave correctly in each case.
  */
 export async function attackForgedRefresh(): Promise<AttackResult> {
   const h = await bootstrap();

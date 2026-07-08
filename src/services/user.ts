@@ -30,6 +30,7 @@ import type {
   SignedAuthToken,
   WireMessage,
 } from "../protocol/messages.ts";
+import { parseMessage } from "../protocol/parser.ts";
 import { SESSION_REPLAY_WINDOW } from "../config.ts";
 import type { KeyObject } from "node:crypto";
 import type { Transport } from "../transport/types.ts";
@@ -151,11 +152,7 @@ export async function runUserHandshake(params: {
       const onMsg = (s: string) => {
         if (settled) return;
         settled = true;
-        try {
-          res(JSON.parse(s) as WireMessage);
-        } catch (e) {
-          rej(e);
-        }
+        res(parseMessage(s));
       };
       link.onMessage(onMsg);
       link.onClose(onClose);
@@ -238,6 +235,9 @@ export async function runUserHandshake(params: {
     macU: macWithLabel(km, transcript, "user").toString("base64"),
   };
   link.send(JSON.stringify(ack));
+  // km (key-confirmation MAC key) has done its job on both the drone-MAC check
+  // and our own tau_U; it plays no part in the session AEAD, so wipe it now.
+  km.fill(0);
   log("[user] handshake complete");
 
   // Session state. Keys are mutable so an in-band rekey can ratchet them; seq
@@ -266,7 +266,7 @@ export async function runUserHandshake(params: {
 
   link.onMessage((s) => {
     try {
-      const m = JSON.parse(s) as WireMessage;
+      const m = parseMessage(s);
       if (m.kind !== "data" || m.dir !== "d2u") return;
       if (m.epoch !== epoch) return; // stale/old-epoch frame
       if (m.seq <= rxLastSeq - SESSION_REPLAY_WINDOW) return;

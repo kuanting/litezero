@@ -8,30 +8,51 @@ import {
   inProcessCloudClient,
 } from "../scenarios/bootstrap.ts";
 import { runUserHandshake } from "../services/user.ts";
-import { randBytes, sha256, signEcdsa } from "../crypto/primitives.ts";
+import {
+  ephemeralEcdh,
+  randBytes,
+  sha256,
+  signEcdsa,
+} from "../crypto/primitives.ts";
+import { canonicalToken, helloSigDigest } from "../protocol/litezero.ts";
 import { tapTransport } from "./_tap.ts";
 import type { AttackResult } from "./types.ts";
 
 export async function attackReplayToken(): Promise<AttackResult> {
   const h = await bootstrap();
 
+  // Get a genuine, cloud-signed token for the real user...
   const nonceU = randBytes(16).toString("base64");
   const ts = Date.now();
-  const msg = sha256(
+  const authMsg = sha256(
     Buffer.from(`${h.userIdentity.userId}|${h.droneId}|${nonceU}|${ts}`, "utf8"),
   );
-  const userSig = signEcdsa(h.userIdentity.signingKey, msg).toString("base64");
+  const authSig = signEcdsa(h.userIdentity.signingKey, authMsg).toString("base64");
   const signed = await h.cloud.authorize({
     userId: h.userIdentity.userId,
     droneId: h.droneId,
     nonceU,
     ts,
-    userSig,
+    userSig: authSig,
   });
 
-  // Force-expire the token. The cloud signature no longer covers the new
-  // field values, which the drone will catch.
-  const badToken = { ...signed, token: { ...signed.token, exp: Date.now() - 1 } };
+  // ...then age it into the past and RE-SIGN it with the cloud's real key, so
+  // the drone's cloud-signature check PASSES and the *expiry* check is the sole
+  // thing that can reject it. (This is the branch the previous version of this
+  // test never reached — it mutated exp without re-signing, so the drone bailed
+  // at the signature check instead.) We build a fully valid hello around the
+  // expired token so nothing but the TTL is wrong.
+  const expiredToken = {
+    ...signed.token,
+    iat: Date.now() - 40_000,
+    exp: Date.now() - 1_000,
+  };
+  const tokenBytes = canonicalToken(expiredToken);
+  const cloudSig = signEcdsa(h.cloud.cloudKey.privateKey, tokenBytes).toString("base64");
+  const eph = ephemeralEcdh();
+  const nonceUBuf = Buffer.from(expiredToken.nonceU, "base64");
+  const helloDigest = helloSigDigest(tokenBytes, eph.pub, nonceUBuf);
+  const userSig = signEcdsa(h.userIdentity.signingKey, helloDigest).toString("base64");
 
   const link = h.connectToDrone();
   let reply = "";
@@ -40,14 +61,16 @@ export async function attackReplayToken(): Promise<AttackResult> {
       reply = s;
       resolve();
     });
+    link.onClose(() => resolve());
   });
   link.send(
     JSON.stringify({
       kind: "hello",
-      authToken: badToken.token,
-      cloudSig: badToken.cloudSig,
-      userPub: randBytes(65).toString("base64"),
-      nonceU,
+      authToken: expiredToken,
+      cloudSig,
+      userPub: eph.pub.toString("base64"),
+      nonceU: expiredToken.nonceU,
+      userSig,
     }),
   );
   await doneP;
@@ -55,13 +78,17 @@ export async function attackReplayToken(): Promise<AttackResult> {
   await h.shutdown();
 
   const parsed = JSON.parse(reply) as { kind: string; reason?: string };
-  const defended = parsed.kind === "error";
+  // This leg exists specifically to exercise the token-expiry branch, so we
+  // require BOTH that no session opened AND that the rejection is the expiry
+  // check — otherwise the test would silently pass on some earlier check
+  // without ever validating TTL enforcement.
+  const defended = parsed.kind === "error" && /expired/i.test(parsed.reason ?? "");
   return {
     name: "replay of expired / tampered auth token",
     defended,
     detail: defended
-      ? `drone rejected: ${parsed.reason}`
-      : "drone accepted an expired token — BAD",
+      ? `drone rejected the validly-signed but expired token: ${parsed.reason}`
+      : `expiry not enforced as expected (kind=${parsed.kind}, reason=${parsed.reason})`,
   };
 }
 

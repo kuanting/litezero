@@ -22,7 +22,7 @@
 // so a nonzero noise rate can be re-enabled; modelling realistic silicon noise
 // and reliability is future work.
 
-import { hkdf, sha256 } from "./primitives.ts";
+import { hkdf, sha256, timingSafeEqual } from "./primitives.ts";
 import {
   PUF_RESPONSE_BITS,
   PUF_NOISE_PROB,
@@ -123,7 +123,10 @@ export function pufRegenerate(seed: PufSeed, helper: PufHelperData): Buffer {
   const expectTag = sha256(
     Buffer.concat([helper.challenge, helper.sketch, reference]),
   );
-  if (!expectTag.equals(helper.tag)) {
+  // Constant-time tag comparison: the tag gates KEK regeneration and is
+  // derived over the recovered (secret) reference, so it is compared with the
+  // same constant-time primitive as every other MAC/tag in the protocol.
+  if (!timingSafeEqual(expectTag, helper.tag)) {
     throw new Error("PUF regeneration failed: helper data tampered or wrong device");
   }
   return hkdf(reference, helper.challenge, "litezero/kek", 32);

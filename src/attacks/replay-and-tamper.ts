@@ -79,7 +79,11 @@ export async function attackReplayAndTamper(): Promise<AttackResult> {
   });
 
   await h.shutdown();
-  const defended = result !== null && /user signature/i.test(result);
+  // Score on outcome: defended iff no session opened (null = a `finish`
+  // arrived). Splicing a fresh E_U/n_U onto a captured token is refused either
+  // by the sigma_U check or by the hello/token nonce binding; both are valid
+  // rejections, so we do not couple PASS to one specific abort string.
+  const defended = result !== null;
   return {
     name: "replay-old-token + tamper-transit (capability matrix gap)",
     defended,

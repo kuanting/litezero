@@ -74,6 +74,17 @@ function isExempt(relPath: string): boolean {
 const DECL_RE =
   /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)[^;\n=]*=\s*(?:await\s+)?([A-Za-z_$][\w$]*)\s*\(/g;
 
+// Regex for a BARE assignment into a previously-declared variable, e.g.
+//   let dScalar: Buffer;
+//   dScalar = aesGcmDecrypt(...);
+// The declaration form above (`let x = origin(...)`) is caught by DECL_RE; this
+// closes the split-declaration blind spot where the secret is bound on a later
+// line. Group 1: variable name.  Group 2: origin function name. We exclude
+// property assignments (`this.x = ...`, `a.b = ...`) by forbidding a `.` right
+// before the name, and exclude the declarator forms so DECL_RE stays canonical.
+const ASSIGN_RE =
+  /(?:^|[;{}])\s*([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?([A-Za-z_$][\w$]*)\s*\(/gm;
+
 // Regex helpers for disposal checks:
 function mkDisposalRegexes(v: string): RegExp[] {
   const esc = v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -92,48 +103,52 @@ function enclosingFunctionBody(
   src: string,
   offset: number,
 ): [number, number] | null {
-  // Find the `{` whose matching `}` encloses `offset`.
-  // Simpler: walk BACK counting unmatched `{`s until we find a `{` with
-  // depth -1, then walk forward from that position to find its `}`.
-  let depth = 0;
-  let openAt = -1;
-  for (let i = offset - 1; i >= 0; i--) {
-    const c = src[i];
-    if (c === "}") depth++;
-    else if (c === "{") {
-      if (depth === 0) {
-        openAt = i;
-        break;
-      }
-      depth--;
-    }
-  }
-  if (openAt === -1) return null;
-  // Forward to matching close.
-  let d = 1;
-  let closeAt = -1;
-  for (let i = openAt + 1; i < src.length; i++) {
-    const c = src[i];
-    if (c === "{") d++;
-    else if (c === "}") {
-      d--;
-      if (d === 0) {
-        closeAt = i;
-        break;
+  // Walk outward through enclosing `{...}` scopes until we reach one that is
+  // function-like (its `{` follows a `)` or `=>`), so a secret declared inside
+  // a try/if/for block is still checked against disposal anywhere in its whole
+  // function — not just the inner block. Returns the function body span, or
+  // null at module scope.
+  let from = offset;
+  for (;;) {
+    // Find the `{` whose matching `}` encloses `from`.
+    let depth = 0;
+    let openAt = -1;
+    for (let i = from - 1; i >= 0; i--) {
+      const c = src[i];
+      if (c === "}") depth++;
+      else if (c === "{") {
+        if (depth === 0) {
+          openAt = i;
+          break;
+        }
+        depth--;
       }
     }
+    if (openAt === -1) return null;
+    // Forward to matching close.
+    let d = 1;
+    let closeAt = -1;
+    for (let i = openAt + 1; i < src.length; i++) {
+      const c = src[i];
+      if (c === "{") d++;
+      else if (c === "}") {
+        d--;
+        if (d === 0) {
+          closeAt = i;
+          break;
+        }
+      }
+    }
+    if (closeAt === -1) return null;
+    // Is this brace function-like? Look backwards from openAt for `)` or `=>`.
+    let j = openAt - 1;
+    while (j >= 0 && /\s/.test(src[j])) j--;
+    if (j >= 0 && src[j] === ")") return [openAt, closeAt]; // function(...) { }
+    if (j >= 0 && src.substring(Math.max(0, j - 1), j + 1) === "=>")
+      return [openAt, closeAt]; // arrow
+    // Plain block (try/if/for/else/bare) — keep walking outward.
+    from = openAt;
   }
-  if (closeAt === -1) return null;
-  // Heuristic: ensure this brace actually follows a function-like
-  // signature. Look backwards from openAt for `)` or `=>`.
-  let j = openAt - 1;
-  while (j >= 0 && /\s/.test(src[j])) j--;
-  if (j < 0) return null;
-  if (src[j] === ")") return [openAt, closeAt]; // function(...) { ... }
-  if (src.substring(Math.max(0, j - 1), j + 1) === "=>")
-    return [openAt, closeAt]; // arrow
-  // Fallback: still treat as a scope (could be a block statement).
-  return [openAt, closeAt];
 }
 
 function lineNumberOf(src: string, offset: number): number {
@@ -146,42 +161,54 @@ function scanFile(absPath: string, relPath: string): Finding[] {
   const src = readFileSync(absPath, "utf8");
   if (src.includes("// @secret-lint-exempt")) return [];
   const findings: Finding[] = [];
+  // Dedup so a declaration-with-initializer is not also reported by ASSIGN_RE.
+  const seen = new Set<number>();
 
-  DECL_RE.lastIndex = 0;
-  for (;;) {
-    const m = DECL_RE.exec(src);
-    if (!m) break;
-    const [, varName, origin] = m;
-    if (!APPROVED_SECRET_ORIGINS.includes(origin)) continue;
+  const scan = (re: RegExp): void => {
+    re.lastIndex = 0;
+    for (;;) {
+      const m = re.exec(src);
+      if (!m) break;
+      const [, varName, origin] = m;
+      if (!APPROVED_SECRET_ORIGINS.includes(origin)) continue;
 
-    // Check for @secret-escapes: comment on the declaration or preceding
-    // up-to 3 lines.
-    const declOffset = m.index;
-    const lineStart = src.lastIndexOf("\n", declOffset) + 1;
-    const above = src.substring(
-      Math.max(0, lineStart - 400),
-      declOffset + 200,
-    );
-    if (/@secret-escapes:/.test(above)) continue;
+      // The match may start on leading whitespace/`;`/`{`; anchor to the
+      // variable name so line numbers and dedup are stable across regexes.
+      const declOffset = src.indexOf(varName, m.index);
+      if (seen.has(declOffset)) continue;
+      seen.add(declOffset);
 
-    const body = enclosingFunctionBody(src, declOffset);
-    const searchIn = body
-      ? src.substring(body[0], body[1])
-      : src; // fallthrough: whole file
-    const regs = mkDisposalRegexes(varName);
-    const disposed = regs.some((r) => r.test(searchIn));
-    if (!disposed) {
-      findings.push({
-        file: relPath,
-        line: lineNumberOf(src, declOffset),
-        origin,
-        varName,
-        reason: body
-          ? "no .fill(0)/zeroize()/dispose() for this binding in the enclosing function"
-          : "secret at module scope; no enclosing function to zeroize in",
-      });
+      // Check for @secret-escapes: comment on the declaration or preceding
+      // up-to 3 lines.
+      const lineStart = src.lastIndexOf("\n", declOffset) + 1;
+      const above = src.substring(
+        Math.max(0, lineStart - 400),
+        declOffset + 200,
+      );
+      if (/@secret-escapes:/.test(above)) continue;
+
+      const body = enclosingFunctionBody(src, declOffset);
+      const searchIn = body
+        ? src.substring(body[0], body[1])
+        : src; // fallthrough: whole file
+      const regs = mkDisposalRegexes(varName);
+      const disposed = regs.some((r) => r.test(searchIn));
+      if (!disposed) {
+        findings.push({
+          file: relPath,
+          line: lineNumberOf(src, declOffset),
+          origin,
+          varName,
+          reason: body
+            ? "no .fill(0)/zeroize()/dispose() for this binding in the enclosing function"
+            : "secret at module scope; no enclosing function to zeroize in",
+        });
+      }
     }
-  }
+  };
+
+  scan(DECL_RE);
+  scan(ASSIGN_RE);
   return findings;
 }
 

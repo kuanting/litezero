@@ -19,7 +19,6 @@ import {
   exportPublicJwk,
   generateSigningKey,
   randBytes,
-  sha256,
   signEcdsa,
 } from "../crypto/primitives.ts";
 import { canonicalToken, helloSigDigest } from "../protocol/litezero.ts";
@@ -138,7 +137,6 @@ export async function attackPowerfulAttacker(): Promise<AttackResult> {
     subEph.pub,
     Buffer.from(substitutedToken.nonceU, "base64"),
   );
-  void sha256;
   const subSig = signEcdsa(fakeUser.privateKey, subDigest).toString("base64");
   const subHello: HandshakeHello = {
     kind: "hello",
@@ -188,9 +186,14 @@ export async function attackPowerfulAttacker(): Promise<AttackResult> {
   //    provisioning, NOT against the token's userVerifyKeyJwk, so a rogue
   //    token carrying pk_U'=attacker fails even though sigma_U verifies
   //    under pk_U'. A stolen sk_C is an authorization-only capability.
-  const defA = rA !== null && /user signature/i.test(rA);
-  const defB = rB !== null && /user signature/i.test(rB);
-  const defC = rC !== null && /user signature/i.test(rC);
+  // Score on the security outcome (no session opened) rather than a specific
+  // abort string. Each strategy is refused for a legitimate reason — A by the
+  // hello/token nonce binding or sigma_U, B by the random-signature check, C by
+  // the provisioning-pinned user key (a stolen sk_C is authorization-only) —
+  // and a null result means the drone returned a `finish`, i.e. the attack won.
+  const defA = rA !== null;
+  const defB = rB !== null;
+  const defC = rC !== null;
 
   const defended = defA && defB && defC;
   const detail =

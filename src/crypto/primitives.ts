@@ -6,7 +6,7 @@
 // trace a line of code to a published specification:
 //
 //   - ECDH on NIST P-256 ............... NIST SP 800-56A Rev.~3, sec.~5.7.1.2
-//   - ECDSA on NIST P-256 .............. FIPS PUB 186-4, sec.~6
+//   - ECDSA on NIST P-256 .............. FIPS PUB 186-5, sec.~6
 //   - HKDF (HMAC-SHA256) ............... RFC 5869 (Krawczyk 2010, CRYPTO)
 //   - AES-256-GCM ...................... NIST SP 800-38D
 //   - Key generation ................... NIST SP 800-133 Rev.~2
@@ -119,7 +119,7 @@ export function ecdhSharedSecret(self: EphemeralKey, peerPub: Buffer): Buffer {
 }
 
 /* ------------------------------------------------------------------ */
-/* ECDSA P-256 long-term signing keys  (FIPS 186-4)                    */
+/* ECDSA P-256 long-term signing keys  (FIPS 186-5)                    */
 /* ------------------------------------------------------------------ */
 
 export interface SigningKeyPair {
