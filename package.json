@@ -13,6 +13,7 @@
     "mavlink:interop": "python3 tools/mavlink_interop_check.py",
     "attack": "node --experimental-transform-types --no-warnings scripts/run-attacks.ts",
     "matrix": "node --experimental-transform-types --no-warnings scripts/run-capability-matrix.ts",
+    "harden": "node --experimental-transform-types --no-warnings scripts/run-hardening-tests.ts",
     "lint:secrets": "node --experimental-transform-types --no-warnings scripts/dead-secret-lint.ts",
     "bench": "node --experimental-transform-types --no-warnings scripts/bench.ts",
     "bench:bun": "bun scripts/bench.ts",

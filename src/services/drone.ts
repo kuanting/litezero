@@ -35,7 +35,11 @@ import type {
   WireMessage,
 } from "../protocol/messages.ts";
 import { parseMessage } from "../protocol/parser.ts";
-import { MAX_PENDING_HANDSHAKES, SESSION_REPLAY_WINDOW } from "../config.ts";
+import {
+  MAX_PENDING_HANDSHAKES,
+  MAX_SEEN_HELLO_NONCES,
+  SESSION_REPLAY_WINDOW,
+} from "../config.ts";
 import type { KeyObject } from "node:crypto";
 import type { Transport, TransportServer } from "../transport/types.ts";
 
@@ -155,7 +159,21 @@ class DroneSession {
     private seenHelloNonces: Map<string, number>,
     /** Bounded half-open registry shared across connections. */
     private halfOpen: HalfOpenRegistry,
+    /**
+     * When this drone process started. The single-use nonce cache is
+     * in-memory, so a restart empties it; rejecting any token issued before
+     * boot (iat < bootTimeMs) closes the replay window a restart would
+     * otherwise re-open for hellos captured in the previous boot.
+     */
+    private bootTimeMs: number,
   ) {}
+
+  /** Drop expired entries so the single-use cache tracks only live nonces. */
+  private pruneExpiredNonces(now: number): void {
+    for (const [n, exp] of this.seenHelloNonces) {
+      if (now > exp) this.seenHelloNonces.delete(n);
+    }
+  }
 
   handleMessage(msg: WireMessage): void {
     switch (msg.kind) {
@@ -182,6 +200,12 @@ class DroneSession {
       return this.abort("invalid cloud signature");
     }
     if (Date.now() > msg.authToken.exp) return this.abort("auth token expired");
+    // The nonce cache does not survive a restart, so a token minted before
+    // this boot may carry a nonce we have already accepted (and forgotten).
+    // Refuse it: a legitimate user just fetches a fresh token (TTL 30 s).
+    if (msg.authToken.iat < this.bootTimeMs) {
+      return this.abort("auth token predates drone boot");
+    }
     if (msg.authToken.droneId !== this.cfg.droneId) return this.abort("wrong drone");
     // The hello carries nonceU twice: once cloud-signed inside the token and
     // once at the top level (bound by sigma_U). They must be the same value so
@@ -195,12 +219,15 @@ class DroneSession {
     // drone accepts a given nonceU at most once within its TTL. This stops
     // wholesale replay of a captured hello (G3) and caps the work an attacker
     // can trigger per token. Expired entries are pruned on each hello.
-    const now = Date.now();
-    for (const [n, exp] of this.seenHelloNonces) {
-      if (now > exp) this.seenHelloNonces.delete(n);
-    }
+    this.pruneExpiredNonces(Date.now());
     if (this.seenHelloNonces.has(msg.nonceU)) {
       return this.abort("hello replay: nonce already used");
+    }
+    // Fail closed if the live-nonce cache is at capacity: evicting an
+    // unexpired nonce would re-open a replay window for its hello, and only
+    // cloud-signed tokens can fill the cache in the first place.
+    if (this.seenHelloNonces.size >= MAX_SEEN_HELLO_NONCES) {
+      return this.abort("hello-nonce cache full: retry after token expiry");
     }
 
     // Step 2: verify the user's PoP signature sigma_U over (tok || E_U || n_U)
@@ -478,8 +505,11 @@ class DroneSession {
         if (ctrl.token.droneId !== this.cfg.droneId) return; // wrong drone
         if (ctrl.token.userId !== this.state.userId) return; // wrong user
         if (Date.now() > ctrl.token.exp) return; // already expired
-        // The refresh token carries a fresh nonceU; enforce single-use too.
+        // The refresh token carries a fresh nonceU; enforce single-use too,
+        // with the same prune + fail-closed capacity rule as the hello path.
+        this.pruneExpiredNonces(Date.now());
         if (this.seenHelloNonces.has(ctrl.token.nonceU)) return; // replayed refresh
+        if (this.seenHelloNonces.size >= MAX_SEEN_HELLO_NONCES) return; // cache full
         this.seenHelloNonces.set(ctrl.token.nonceU, ctrl.token.exp);
         this.state.authExp = ctrl.token.exp;
         this.state.scope = ctrl.token.policy.scope;
@@ -585,8 +615,11 @@ export function attachDrone(
   helper: PufHelperData,
 ): DroneServerStats {
   // Hello-nonce single-use cache, shared by ALL connections to this drone so a
-  // hello captured on one connection cannot be replayed on another.
+  // hello captured on one connection cannot be replayed on another. It is
+  // in-memory only; tokens issued before bootTimeMs are rejected so a restart
+  // (which empties the cache) cannot re-open a replay window.
   const seenHelloNonces = new Map<string, number>();
+  const bootTimeMs = Date.now();
 
   // Bounded half-open registry, shared across connections. A Set preserves
   // insertion order, so the "oldest" evictable slot is simply the first entry.
@@ -608,7 +641,7 @@ export function attachDrone(
   };
 
   server.onConnection((link) => {
-    const sess = new DroneSession(cfg, blackKey, helper, link, seenHelloNonces, halfOpen);
+    const sess = new DroneSession(cfg, blackKey, helper, link, seenHelloNonces, halfOpen, bootTimeMs);
     link.onMessage((s) => {
       // Single strict parsing chokepoint: every inbound byte string is
       // schema-validated before it reaches the session state machine. A

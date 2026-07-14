@@ -20,6 +20,17 @@ export const SESSION_REPLAY_WINDOW = 64;
 // attacker slot. A fielded drone would pair this with a per-source rate limit.
 export const MAX_PENDING_HANDSHAKES = 32;
 
+// Maximum number of live (unexpired) hello nonces the drone remembers for
+// single-use enforcement. Entries expire with their token TTL, so the cache
+// only approaches this bound if the cloud issues that many tokens for this
+// drone within one TTL window. If the bound is ever hit the drone FAILS
+// CLOSED and rejects new hellos rather than evicting a live nonce, since
+// evicting would re-open a replay window for the evicted hello; the attacker
+// cannot force this state without cloud-signed tokens, so the residual DoS is
+// bounded by the cloud's own issuance rate.
+export const MAX_SEEN_HELLO_NONCES =
+  Number(process.env.LZ_MAX_SEEN_HELLO_NONCES) || 4096;
+
 // Domain separation label for our HKDF-based KDF.
 export const KDF_LABEL = "litezero/v1";
 

@@ -47,6 +47,9 @@ jobs:
       - name: Capability matrix (all 21 scenarios must be defended)
         run: node --experimental-transform-types --no-warnings scripts/run-capability-matrix.ts
 
+      - name: Drone-hardening regression tests (reboot replay, cache fail-closed)
+        run: node --experimental-transform-types --no-warnings scripts/run-hardening-tests.ts
+
       - name: MAVLink codec self-test
         run: node --experimental-transform-types --no-warnings scripts/mavlink-selftest.ts
 
