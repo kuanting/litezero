@@ -28,20 +28,36 @@ import {
   ephemeralEcdh,
   exportPublicJwk,
   generateSigningKey,
-  randBytes,
   signEcdsa,
 } from "../crypto/primitives.ts";
 import { canonicalToken } from "../protocol/litezero.ts";
-import type {
-  AuthToken,
-  SignedAuthToken,
-} from "../protocol/messages.ts";
+import type { AuthToken } from "../protocol/messages.ts";
 import type { CloudClient } from "../services/user.ts";
 import type { AttackResult } from "./types.ts";
+import type { KeyObject } from "node:crypto";
 
-/** A cloud client that always returns a fixed attacker-minted token. */
-function rogueCloud(signed: SignedAuthToken): CloudClient {
-  return { async authorize() { return signed; } };
+/**
+ * A rogue cloud that mints a token PER REQUEST using the attacker's stolen
+ * sk_C, echoing the caller's freshly generated nonceU into the token exactly as
+ * an honest cloud would. This is what makes the forged input STRUCTURALLY VALID
+ * all the way to the advertised defense: the hello's top-level nonceU then
+ * matches authToken.nonceU, so the drone's nonce-desync guard passes and the
+ * request reaches the pinned-identity checks that are the actual subject of the
+ * test (rather than aborting early on a nonce mismatch, which would let an
+ * unrelated rejection masquerade as the defense).
+ */
+function rogueCloud(build: (nonceU: string) => AuthToken, stolenSk: KeyObject, stolenPk: KeyObject): CloudClient {
+  return {
+    async authorize(req) {
+      const token = build(req.nonceU);
+      return {
+        token,
+        cloudSig: signEcdsa(stolenSk, canonicalToken(token)).toString("base64"),
+        cloudVerifyKeyJwk: exportPublicJwk(stolenPk),
+        dronePubKey: token.dronePubKey,
+      };
+    },
+  };
 }
 
 export async function attackStolenCloudKey(): Promise<AttackResult> {
@@ -51,27 +67,14 @@ export async function attackStolenCloudKey(): Promise<AttackResult> {
   const realUserVk = h.cloud.users.get(h.userIdentity.userId)!.verifyKeyJwk;
   const ttl = () => ({ iat: Date.now(), exp: Date.now() + 30_000 });
 
-  const sign = (token: AuthToken): SignedAuthToken => ({
-    token,
-    cloudSig: signEcdsa(stolen.privateKey, canonicalToken(token)).toString("base64"),
-    cloudVerifyKeyJwk: exportPublicJwk(stolen.publicKey),
-    dronePubKey: token.dronePubKey,
-  });
-
   // ---- (a) user-key substitution: try to COMMAND the drone -----------------
   // Attacker mints a token advertising its OWN pk_U and signs the hello with
   // the matching sk_U'. A naive (Option B) drone that trusted the token's key
-  // would accept. The pinned-user-key drone must reject.
+  // would accept. The pinned-user-key drone must reject. The token echoes the
+  // request's nonceU, so the hello passes cloud-sig, expiry, droneId, nonce-
+  // desync and single-use checks and fails SPECIFICALLY at the pinned-user-key
+  // signature check — the defense this row advertises.
   const fakeUser = generateSigningKey();
-  const tokA: AuthToken = {
-    userId: h.userIdentity.userId,
-    droneId: h.droneId,
-    nonceU: randBytes(16).toString("base64"),
-    ...ttl(),
-    policy: { scope: ["control", "telemetry"] },
-    userVerifyKeyJwk: exportPublicJwk(fakeUser.publicKey), // ROGUE substitution
-    dronePubKey: realDronePub,
-  };
   let errA: string | null = null;
   try {
     const s = await runUserHandshake({
@@ -79,55 +82,68 @@ export async function attackStolenCloudKey(): Promise<AttackResult> {
         userId: h.userIdentity.userId,
         signingKey: fakeUser.privateKey, // attacker's key, matches tokA
         pinnedDrones: h.userIdentity.pinnedDrones, // so we reach the drone check
+        // Attacker drives the user role and "trusts" the very key it stole,
+        // so its rogue token passes the user-side sigma_C check by design;
+        // the defense under test is the drone-side pinned-key check.
+        cloudVerifyKey: stolen.publicKey,
       },
       droneId: h.droneId,
-      cloud: rogueCloud(sign(tokA)),
+      cloud: rogueCloud(
+        (nonceU) => ({
+          userId: h.userIdentity.userId,
+          droneId: h.droneId,
+          nonceU, // echo the caller's fresh nonce → passes the desync guard
+          ...ttl(),
+          policy: { scope: ["control", "telemetry"] },
+          userVerifyKeyJwk: exportPublicJwk(fakeUser.publicKey), // ROGUE substitution
+          dronePubKey: realDronePub,
+        }),
+        stolen.privateKey,
+        stolen.publicKey,
+      ),
       link: h.connectToDrone(),
     });
     s.close();
   } catch (e) {
     errA = (e as Error).message;
   }
-  // Security boundary: the attack succeeds iff the user COMPLETES a session
-  // driven by the forged token. runUserHandshake returns a session only on
-  // success and throws on any rejection, so "no session opened" (errA !== null)
-  // is the faithful defended predicate — we score the security outcome, not a
-  // specific abort string. In the common case errA is the drone's pinned-key
-  // rejection ("invalid user signature on hello"); we surface the reason in the
-  // detail below for diagnostics.
-  const defendedA = errA !== null;
+  // The advertised defense is the drone's pinned-user-key check. Assert the
+  // handshake both fails (no session) AND fails for that specific reason, so an
+  // earlier unrelated rejection cannot be scored as this defense.
+  const defendedA = errA !== null && /invalid user signature on hello/.test(errA);
 
   // ---- (b) drone-key substitution: try to LURE the user to a fake drone ----
   // Attacker mints a token (for the real user) whose dronePubKey is a Q_D' it
   // controls. The legit user signs the hello with the real sk_U, but must
   // refuse because the token's P_D disagrees with the owner-pinned P_D.
   const rogueDronePub = ephemeralEcdh().pub.toString("base64"); // attacker Q_D'
-  const tokB: AuthToken = {
-    userId: h.userIdentity.userId,
-    droneId: h.droneId,
-    nonceU: randBytes(16).toString("base64"),
-    ...ttl(),
-    policy: { scope: ["control", "telemetry"] },
-    userVerifyKeyJwk: realUserVk,
-    dronePubKey: rogueDronePub, // ROGUE substitution
-  };
   let errB: string | null = null;
   try {
     const s = await runUserHandshake({
       identity: h.userIdentity, // legit user, pins the real P_D
       droneId: h.droneId,
-      cloud: rogueCloud(sign(tokB)),
+      cloud: rogueCloud(
+        (nonceU) => ({
+          userId: h.userIdentity.userId,
+          droneId: h.droneId,
+          nonceU, // echo the caller's fresh nonce → token is well-formed
+          ...ttl(),
+          policy: { scope: ["control", "telemetry"] },
+          userVerifyKeyJwk: realUserVk,
+          dronePubKey: rogueDronePub, // ROGUE substitution
+        }),
+        stolen.privateKey,
+        stolen.publicKey,
+      ),
       link: h.connectToDrone(),
     });
     s.close();
   } catch (e) {
     errB = (e as Error).message;
   }
-  // Same security boundary as direction (a): defended iff the user never opens
-  // a session with the substituted P_D. In the common case errB is the user's
-  // pin rejection ("drone pubkey mismatch — token P_D differs from owner-pinned
-  // P_D"); surfaced in the detail below.
-  const defendedB = errB !== null;
+  // The advertised defense is the user-side owner-pinned P_D check. Assert the
+  // specific rejection reason so an earlier unrelated abort cannot pass as it.
+  const defendedB = errB !== null && /pinned P_D|drone pubkey mismatch/.test(errB);
 
   await h.shutdown();
   const defended = defendedA && defendedB;

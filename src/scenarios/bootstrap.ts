@@ -150,6 +150,8 @@ export async function bootstrap(opts?: {
     userId,
     signingKey: userKey.privateKey,
     pinnedDrones,
+    // vk_C provisioned out of band at enrollment (never read from a token).
+    cloudVerifyKey: cloud.cloudKey.publicKey,
   };
 
   return {

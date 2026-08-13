@@ -22,8 +22,10 @@
     "verifpal": "for m in auth secrecy fs; do verifpal verify models/litezero-$m.vp || exit 1; done",
     "test": "node --experimental-transform-types --no-warnings scripts/run-attacks.ts"
   },
-  "dependencies": {},
-  "devDependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "typescript": "^5.6.3"
+  },
   "engines": {
     "node": ">=22.7"
   }

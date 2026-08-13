@@ -28,8 +28,52 @@ const { inProcessListen, inProcessConnect } = await import(
 );
 const { MAX_SEEN_HELLO_NONCES } = await import("../src/config.ts");
 const { tapTransport } = await import("../src/attacks/_tap.ts");
+const { randomBytes } = await import("node:crypto");
+type Transport = import("../src/transport/types.ts").Transport;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Wrap a Transport so a test can also push synthetic INBOUND frames straight to
+ * the protocol code's registered onMessage callbacks (as if the peer had sent
+ * them), and observe local close(). Used by the AEAD-budget tests to feed
+ * forged d2u frames into the user's receive path.
+ */
+function injectable(inner: Transport): Transport & {
+  pushInbound: (m: string) => void;
+  closed: () => boolean;
+} {
+  const msgCbs: ((m: string) => void)[] = [];
+  const closeCbs: (() => void)[] = [];
+  let isClosed = false;
+  inner.onMessage((m) => msgCbs.forEach((cb) => cb(m)));
+  inner.onClose(() => closeCbs.forEach((cb) => cb()));
+  return {
+    send: (m) => inner.send(m),
+    onMessage: (cb) => msgCbs.push(cb),
+    onClose: (cb) => closeCbs.push(cb),
+    close: () => {
+      isClosed = true;
+      inner.close();
+    },
+    pushInbound: (m) => msgCbs.forEach((cb) => cb(m)),
+    closed: () => isClosed,
+  };
+}
+
+/** A syntactically valid but cryptographically bogus d2u app frame. */
+function forgedD2uFrame(seq: number): string {
+  return JSON.stringify({
+    kind: "data",
+    dir: "d2u",
+    epoch: 0,
+    chan: "app",
+    seq,
+    iv: randomBytes(12).toString("base64"),
+    ct: randomBytes(16).toString("base64"),
+    tag: randomBytes(16).toString("base64"),
+  });
+}
 
 interface TestResult {
   name: string;
@@ -155,8 +199,170 @@ async function testCacheFailClosed(): Promise<TestResult> {
   };
 }
 
+/**
+ * Test 3 (send budget): with a tiny per-epoch-key cap, the (cap+1)-th send()
+ * throws, and a rekey (fresh key ⇒ fresh budget) lets sending resume. Exercises
+ * both the tx-cap enforcement and the rekey reset.
+ */
+async function testSendCapAndRekeyReset(): Promise<TestResult> {
+  const prev = process.env.LZ_MAX_FRAMES_PER_EPOCH_KEY;
+  process.env.LZ_MAX_FRAMES_PER_EPOCH_KEY = "4";
+  try {
+    const h = await bootstrap();
+
+    // Part A: at the hard cap, the next send throws (teardown, not silent reuse).
+    const sA = await runUserHandshake({
+      identity: h.userIdentity, droneId: h.droneId,
+      cloud: inProcessCloudClient(h.cloud), link: h.connectToDrone(),
+    });
+    for (let i = 0; i < 4; i++) await sA.send(Buffer.from(`f${i}`));
+    let threw = "";
+    try {
+      await sA.send(Buffer.from("overflow"));
+    } catch (e) {
+      threw = (e as Error).message;
+    }
+    sA.close();
+
+    // Part B: rekeying WITH headroom resets the budget so sending resumes under
+    // the fresh key (a rekey consumes one control frame, so it is triggered
+    // before the cap, as a deployment would).
+    const sB = await runUserHandshake({
+      identity: h.userIdentity, droneId: h.droneId,
+      cloud: inProcessCloudClient(h.cloud), link: h.connectToDrone(),
+    });
+    await sB.send(Buffer.from("b0"));
+    await sB.send(Buffer.from("b1"));
+    await sB.rekey(); // fresh key ⇒ epochTxCount reset to 0
+    let resumed = true;
+    try {
+      for (let i = 0; i < 4; i++) await sB.send(Buffer.from(`c${i}`));
+    } catch {
+      resumed = false;
+    }
+    sB.close();
+    await h.shutdown();
+
+    const passed = /frame cap reached/.test(threw) && resumed;
+    return {
+      name: "per-epoch send cap enforced; rekey resets budget",
+      passed,
+      detail: passed
+        ? `5th send at cap rejected ("${threw}"); after rekey, 4 more sends accepted under the fresh key`
+        : `cap/rekey behavior wrong (threw="${threw}", resumed=${resumed}) — BAD`,
+    };
+  } finally {
+    if (prev === undefined) delete process.env.LZ_MAX_FRAMES_PER_EPOCH_KEY;
+    else process.env.LZ_MAX_FRAMES_PER_EPOCH_KEY = prev;
+  }
+}
+
+/**
+ * Test 4 (receive budget + forged attempts): forged d2u frames that fail AEAD
+ * still count against the per-epoch decryption-attempt budget q_d, and once the
+ * cap is crossed the receiver tears the session down. Also covers the invalid-
+ * seq receive guard.
+ */
+async function testRecvCapCountsForgedAttempts(): Promise<TestResult> {
+  const prev = process.env.LZ_MAX_FRAMES_PER_EPOCH_KEY;
+  process.env.LZ_MAX_FRAMES_PER_EPOCH_KEY = "5";
+  try {
+    const h = await bootstrap();
+    const link = injectable(h.connectToDrone());
+    const session = await runUserHandshake({
+      identity: h.userIdentity,
+      droneId: h.droneId,
+      cloud: inProcessCloudClient(h.cloud),
+      link,
+    });
+
+    // A malformed seq (negative, or not a safe integer) is dropped by the
+    // receive guard before any counting. NOTE: a large but SAFE integer such as
+    // Number.MAX_SAFE_INTEGER is now VALID (validity is decoupled from the
+    // budget), so we use genuinely invalid values here.
+    link.pushInbound(forgedD2uFrame(-1)); // negative
+    link.pushInbound(forgedD2uFrame(2 ** 53)); // not a safe integer
+    const closedAfterInvalidSeq = link.closed();
+
+    // Six forged (AEAD-failing) frames, each a valid in-range seq: attempts
+    // 1..5 are tolerated, the 6th crosses the cap of 5 and closes the session.
+    for (let i = 0; i < 6; i++) link.pushInbound(forgedD2uFrame(0));
+    const closedAfterCap = link.closed();
+
+    session.close();
+    await h.shutdown();
+
+    const passed = !closedAfterInvalidSeq && closedAfterCap;
+    return {
+      name: "per-epoch recv cap counts forged attempts; invalid seq dropped",
+      passed,
+      detail: passed
+        ? "out-of-range seq dropped without teardown; 6th forged attempt (>cap=5) tore the session down"
+        : `budget accounting wrong (invalidSeqClosed=${closedAfterInvalidSeq}, capClosed=${closedAfterCap}) — BAD`,
+    };
+  } finally {
+    if (prev === undefined) delete process.env.LZ_MAX_FRAMES_PER_EPOCH_KEY;
+    else process.env.LZ_MAX_FRAMES_PER_EPOCH_KEY = prev;
+  }
+}
+
+/**
+ * Test 5 (cumulative multi-epoch sequence): with a tiny per-epoch cap, drive
+ * several epochs so the MONOTONE txSeq climbs well past the cap, then confirm a
+ * fresh-epoch frame whose seq exceeds the cap is still accepted and delivered.
+ * This is the case the earlier budget-coupled seq validator wrongly rejected:
+ * seq validity must be independent of the per-epoch AEAD budget.
+ */
+async function testCumulativeSeqAcrossEpochs(): Promise<TestResult> {
+  const prev = process.env.LZ_MAX_FRAMES_PER_EPOCH_KEY;
+  process.env.LZ_MAX_FRAMES_PER_EPOCH_KEY = "3";
+  try {
+    const h = await bootstrap();
+    const session = await runUserHandshake({
+      identity: h.userIdentity, droneId: h.droneId,
+      cloud: inProcessCloudClient(h.cloud), link: h.connectToDrone(),
+    });
+
+    // epoch 0: two app frames (seq 0,1), then two rekeys (seq 2,3). After this
+    // the monotone txSeq is 4 > cap=3, but each epoch's budget was reset.
+    await session.send(Buffer.from("f0"));
+    await session.send(Buffer.from("f1"));
+    await session.rekey();
+    await session.rekey();
+
+    // This app frame carries seq >= 4 (> cap). Budget-coupled validation would
+    // reject it as "invalid seq"; decoupled validation accepts and delivers it.
+    let delivered = false;
+    await new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, 1000); // bound the wait; failure ⇒ not delivered
+      session.onFrame(() => { delivered = true; clearTimeout(t); resolve(); });
+      void session.send(Buffer.from("PING"));
+    });
+
+    session.close();
+    await h.shutdown();
+
+    return {
+      name: "cumulative seq past cap across rekeys still delivered",
+      passed: delivered,
+      detail: delivered
+        ? "a fresh-epoch frame with seq > cap (cumulative monotone txSeq) was accepted and delivered"
+        : "fresh-epoch frame with seq > cap was rejected — seq validity still coupled to the budget — BAD",
+    };
+  } finally {
+    if (prev === undefined) delete process.env.LZ_MAX_FRAMES_PER_EPOCH_KEY;
+    else process.env.LZ_MAX_FRAMES_PER_EPOCH_KEY = prev;
+  }
+}
+
 async function main() {
-  const tests = [testRebootReplay, testCacheFailClosed];
+  const tests = [
+    testRebootReplay,
+    testCacheFailClosed,
+    testSendCapAndRekeyReset,
+    testRecvCapCountsForgedAttempts,
+    testCumulativeSeqAcrossEpochs,
+  ];
   const results: TestResult[] = [];
   for (const t of tests) results.push(await t());
 

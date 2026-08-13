@@ -86,13 +86,20 @@ export async function attackMavlinkInjection(): Promise<AttackResult> {
     .push(killFrame)
     .some((f) => f.crcOk && decodeFields(f).name === "COMMAND_LONG");
 
-  // Inject the raw MAVLink bytes straight onto the transport, as a forged
-  // "data" session frame and also as a bare write — the drone has no matching
-  // AEAD key/sequence, so it must reject both without ever decoding MAVLink.
+  // Inject the raw MAVLink kill-command as a forged data frame INTO the
+  // ESTABLISHED session (same live link, correct epoch, an unused in-window
+  // seq). The drone therefore reaches handleData with live keys and must reject
+  // it at AEAD authentication — the in-tunnel defense — rather than on a "no
+  // session" rejection from a fresh connection. The attacker lacks the
+  // directional key, so no tag it can produce verifies.
+  // Snapshot the ciphertext seen for the LEGITIMATE exchange only; the forged
+  // frame we are about to inject carries raw MAVLink as its "ct" by design, so
+  // including it would trivially (and misleadingly) trip the leak check.
+  const legitFrames = [...captured];
+
   let injectionError = "";
-  const injectLink = h.connectToDrone();
   await new Promise<void>((resolve) => {
-    injectLink.onMessage((s) => {
+    tapped.onMessage((s) => {
       try {
         const m = JSON.parse(s) as { kind: string; reason?: string };
         if (m.kind === "error") {
@@ -103,30 +110,27 @@ export async function attackMavlinkInjection(): Promise<AttackResult> {
         /* ignore */
       }
     });
-    injectLink.send(
+    tapped.send(
       JSON.stringify({
         kind: "data",
         dir: "u2d",
         epoch: 0,
         chan: "app",
-        seq: 0,
+        seq: 1000, // unused, in-window, valid — forces the AEAD check, not replay
         iv: randBytes(12).toString("base64"),
         ct: killFrame.toString("base64"), // raw MAVLink as the "ciphertext"
         tag: randBytes(16).toString("base64"),
       }),
     );
-    // The drone either replies with an error or silently drops the frame; both
-    // are valid defenses. We do not gate the verdict on the reply arriving, so
-    // this deadline only bounds how long we wait to record an explicit reason.
+    // Bound the wait for an explicit reason; a silent drop is still a defense.
     setTimeout(resolve, 500);
   });
-  injectLink.close();
   session.close();
   await h.shutdown();
 
   // Confidentiality: no captured frame may contain the MAVLink magic byte or a
   // decodable command. Frames are base64 JSON, so decode the ct fields.
-  const leaked = captured.some((raw) => {
+  const leaked = legitFrames.some((raw) => {
     try {
       const m = JSON.parse(raw) as { kind?: string; ct?: string };
       if (m.kind !== "data" || !m.ct) return false;
@@ -142,13 +146,18 @@ export async function attackMavlinkInjection(): Promise<AttackResult> {
   // The security property is: the forged disarm never executed and no plaintext
   // MAVLink ever appeared on the wire. Whether the drone actively replied with
   // an error (vs. silently dropping the frame) is informational, not the test.
+  // The security property: the forged disarm never executed and no plaintext
+  // MAVLink appeared on the wire. We additionally require that when the drone
+  // replied, it rejected at the in-tunnel AEAD check (not an unrelated stage),
+  // so the scenario genuinely exercises session-frame authentication.
   const rejection = injectionError !== "" ? injectionError : "frame dropped (no session key)";
-  const defended = forgedDecodes && !leaked && !disarmExecuted;
+  const rejectedAtAead = injectionError === "" || /aead|verify|seq/i.test(injectionError);
+  const defended = forgedDecodes && !leaked && !disarmExecuted && rejectedAtAead;
   return {
     name: "MAVLink command injection / eavesdrop",
     defended,
     detail: defended
-      ? `forged MAVLink disarm was valid (would kill bare MAVLink) but the LiteZero tunnel rejected it (${rejection}); no plaintext MAVLink on the wire`
+      ? `forged MAVLink disarm was valid (would kill bare MAVLink) but the in-tunnel AEAD rejected it (${rejection}); no plaintext MAVLink on the wire`
       : `forgedValid=${forgedDecodes} leaked=${leaked} disarmExecuted=${disarmExecuted} injErr="${injectionError}" — BAD`,
   };
 }

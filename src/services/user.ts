@@ -5,10 +5,12 @@ import {
   aesGcmEncrypt,
   ecdhSharedSecret,
   ephemeralEcdh,
+  destroyEcdh,
   randBytes,
   seqToIv,
   sha256,
   signEcdsa,
+  verifyEcdsa,
 } from "../crypto/primitives.ts";
 import {
   canonicalToken,
@@ -31,7 +33,11 @@ import type {
   WireMessage,
 } from "../protocol/messages.ts";
 import { parseMessage } from "../protocol/parser.ts";
-import { SESSION_REPLAY_WINDOW } from "../config.ts";
+import {
+  SESSION_REPLAY_WINDOW,
+  isValidSeq,
+  maxFramesPerEpochKey,
+} from "../config.ts";
 import type { KeyObject } from "node:crypto";
 import type { Transport } from "../transport/types.ts";
 
@@ -47,6 +53,16 @@ export interface UserIdentity {
    * sk_C. When absent, the user falls back to the token's P_D.
    */
   pinnedDrones?: Map<string, Buffer>;
+  /**
+   * The cloud verify key vk_C the user trusts, provisioned out of band (it is
+   * NOT taken from the token's cloudVerifyKeyJwk copy, which an attacker
+   * controls). The user checks sigma_C over the canonical token before signing
+   * its hello over that token — parity with the Verifpal model's user-side
+   * SIGNVERIF(pk_C, tok, sigC). This is defense-in-depth / fail-fast off the
+   * TLS path; the drone independently re-verifies sigma_C against its own
+   * pinned vk_C, so protocol security never rests on this check alone.
+   */
+  cloudVerifyKey: KeyObject;
 }
 
 export interface CloudClient {
@@ -115,6 +131,20 @@ export async function runUserHandshake(params: {
   });
   log("[user] cloud issued auth token, exp in",
       signed.token.exp - Date.now(), "ms");
+
+  // Verify sigma_C over the canonical token against the provisioned vk_C
+  // before signing our hello over it (Verifpal model parity: the User
+  // principal performs SIGNVERIF(pk_C, tok, sigC) before SIGN(skU, ...)).
+  if (
+    !verifyEcdsa(
+      identity.cloudVerifyKey,
+      canonicalToken(signed.token),
+      Buffer.from(signed.cloudSig, "base64"),
+    )
+  ) {
+    link.close();
+    throw new Error("cloud signature on token invalid");
+  }
 
   const eph = ephemeralEcdh();
 
@@ -212,6 +242,11 @@ export async function runUserHandshake(params: {
   z2.fill(0);
   const { km, kU2D, kD2U } = deriveSessionKeys(ikm, nonceU, nonceD);
   ikm.fill(0);
+  // e_U fed both DH branches and is not needed again; best-effort scrub of the
+  // native ECDH scalar now (see destroyEcdh — the exported JS branch buffers
+  // above are wiped, but the OpenSSL EC_KEY retains its own copy of e_U).
+  // eph.pub is public and still needed for the transcript below, so it stays.
+  destroyEcdh(eph.ecdh);
 
   const tokenBytes = canonicalToken(hello.authToken);
   const transcript = transcriptHash({
@@ -246,6 +281,10 @@ export async function runUserHandshake(params: {
   let txSeq = 0;
   let rxLastSeq = -1;
   let epoch = 0;
+  // Per-epoch-key AEAD budgets (paper § "Session-layer AEAD bound"): encryptions
+  // under curKU2D and decryption attempts under curKD2U, both reset at each rekey.
+  let epochTxCount = 0;
+  let epochRxAttempts = 0;
   let curKU2D = kU2D;
   let curKD2U = kD2U;
   const rxWindow = new Set<number>();
@@ -253,7 +292,18 @@ export async function runUserHandshake(params: {
   // Awaiter for a pending rekey-resp control frame.
   let pendingRekey: { epoch: number; resolve: (ePub: Buffer) => void } | null = null;
 
+  // Enforce the per-epoch-key encryption budget q_e before every seal. At the
+  // cap the caller must rekey (fresh key ⇒ fresh budget) or tear down; we throw
+  // rather than silently reuse a key past its analyzed (key, IV) space.
+  const assertTxBudget = (): void => {
+    if (epochTxCount >= maxFramesPerEpochKey()) {
+      throw new Error("epoch frame cap reached — rekey required");
+    }
+    epochTxCount++;
+  };
+
   const sendCtrl = (ctrl: SessionControl): void => {
+    assertTxBudget();
     const seq = txSeq++;
     const iv = seqToIv(seq);
     const aad = frameAad(droneId, "u2d", epoch, "ctrl", seq);
@@ -269,6 +319,13 @@ export async function runUserHandshake(params: {
       const m = parseMessage(s);
       if (m.kind !== "data" || m.dir !== "d2u") return;
       if (m.epoch !== epoch) return; // stale/old-epoch frame
+      if (!isValidSeq(m.seq)) return; // malformed / out-of-budget seq
+      // Count every decryption attempt (incl. forgeries) against q_d; tear the
+      // session down at the cap rather than keep verifying under a spent key.
+      if (++epochRxAttempts > maxFramesPerEpochKey()) {
+        link.close();
+        return;
+      }
       if (m.seq <= rxLastSeq - SESSION_REPLAY_WINDOW) return;
       if (rxWindow.has(m.seq)) return;
       const chan = m.chan ?? "app";
@@ -305,6 +362,7 @@ export async function runUserHandshake(params: {
 
   return {
     async send(cmd) {
+      assertTxBudget();
       const seq = txSeq++;
       const iv = seqToIv(seq);
       const aad = frameAad(droneId, "u2d", epoch, "app", seq);
@@ -332,6 +390,16 @@ export async function runUserHandshake(params: {
       const fresh = await cloud.authorize({
         userId: identity.userId, droneId, nonceU: n.toString("base64"), ts: t, userSig: sig,
       });
+      // Same sigma_C check as at handshake time before relaying the token.
+      if (
+        !verifyEcdsa(
+          identity.cloudVerifyKey,
+          canonicalToken(fresh.token),
+          Buffer.from(fresh.cloudSig, "base64"),
+        )
+      ) {
+        throw new Error("cloud signature on refreshed token invalid");
+      }
       sendCtrl({ type: "refresh", token: fresh.token, cloudSig: fresh.cloudSig });
     },
     async rekey() {
@@ -346,12 +414,16 @@ export async function runUserHandshake(params: {
       const ikm2 = ecdhSharedSecret(eph2, dronePub2);
       const next = deriveRekeyKeys(ikm2, transcript, target);
       ikm2.fill(0);
+      destroyEcdh(eph2.ecdh); // best-effort native scrub of the rekey ephemeral
       // Retire old epoch keys (intra-session forward secrecy), install new.
       curKU2D.fill(0);
       curKD2U.fill(0);
       curKU2D = next.kU2D;
       curKD2U = next.kD2U;
       epoch = target;
+      // Fresh key ⇒ fresh per-epoch AEAD budget for both directions.
+      epochTxCount = 0;
+      epochRxAttempts = 0;
     },
     async applyPolicy(signed) {
       sendCtrl({ type: "policy", scope: signed.scope, ts: signed.ts, sig: signed.sig });

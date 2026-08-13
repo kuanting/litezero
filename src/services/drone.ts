@@ -4,6 +4,7 @@ import {
   aesGcmDecrypt,
   aesGcmEncrypt,
   assertValidP256Point,
+  destroyEcdh,
   randBytes,
   seqToIv,
   verifyEcdsa,
@@ -39,6 +40,8 @@ import {
   MAX_PENDING_HANDSHAKES,
   MAX_SEEN_HELLO_NONCES,
   SESSION_REPLAY_WINDOW,
+  isValidSeq,
+  maxFramesPerEpochKey,
 } from "../config.ts";
 import type { KeyObject } from "node:crypto";
 import type { Transport, TransportServer } from "../transport/types.ts";
@@ -113,6 +116,10 @@ interface SessionState {
   scope: string[];
   /** Last applied policy timestamp (monotonic guard against stale pushes). */
   policyTs: number;
+  /** AES-GCM encryptions performed under the current epoch's kD2U. */
+  epochTxCount: number;
+  /** AES-GCM decryption ATTEMPTS (incl. rejects) under the current epoch's kU2D. */
+  epochRxAttempts: number;
 }
 
 /** Everything carried from handleHello to handleAck, released only on tau_U. */
@@ -287,10 +294,17 @@ class DroneSession {
       z2 = staticEcdh.computeSecret(userPub);
     } catch {
       dScalar.fill(0);
+      destroyEcdh(staticEcdh); // best-effort native scrub of d_D copy
+      destroyEcdh(ephEcdh); // best-effort native scrub of e_D copy
       return this.abort("bad user pub");
     }
-    // Zeroize d_D immediately after its single use.
+    // Zeroize d_D immediately after its single use: the exported JS buffer AND
+    // (best-effort) the native scalar the ECDH object copied in setPrivateKey.
     dScalar.fill(0);
+    destroyEcdh(staticEcdh);
+    // e_D is not needed again (finish carries E_D; ack needs only K_m), so
+    // scrub the drone ephemeral's native scalar now too.
+    destroyEcdh(ephEcdh);
     const ikm = Buffer.concat([z1, z2]);
     z1.fill(0);
     z2.fill(0);
@@ -367,6 +381,8 @@ class DroneSession {
       baseTranscript: p.baseTranscript,
       scope: p.scope,
       policyTs: 0,
+      epochTxCount: 0,
+      epochRxAttempts: 0,
     };
     // Keys transferred into `state`; drop the pending handles (their buffers
     // are now aliased by `state`, so do NOT zeroize them here). The handshake
@@ -430,6 +446,15 @@ class DroneSession {
     // Epoch gate: a frame sealed under a retired epoch (e.g. an old-key frame
     // replayed after a rekey) no longer matches the live key and is rejected.
     if (msg.epoch !== this.state.epoch) return this.abort("wrong key epoch");
+    // Reject a malformed / out-of-budget sequence number before any crypto.
+    if (!isValidSeq(msg.seq)) return this.abort("invalid seq");
+    // Every decryption ATTEMPT (valid or forged) counts against the per-epoch
+    // key's budget q_d; at the cap the session tears down rather than keep
+    // verifying under a key that has exhausted its analyzed INT-CTXT bound.
+    if (++this.state.epochRxAttempts > maxFramesPerEpochKey()) {
+      this.dispose();
+      return this.abort("epoch decryption-attempt cap reached — rekey required");
+    }
     if (msg.seq <= this.state.rxLastSeq - SESSION_REPLAY_WINDOW) return this.abort("seq too old");
     if (this.state.rxWindow.has(msg.seq)) return this.abort("replay");
 
@@ -556,6 +581,7 @@ class DroneSession {
     }
     const next = deriveRekeyKeys(ikm, this.state.baseTranscript, ctrl.epoch);
     ikm.fill(0);
+    destroyEcdh(eph); // best-effort native scrub of the rekey ephemeral scalar
 
     // Answer under the still-current epoch keys so the user can match it.
     this.sendControl({ type: "rekey-resp", epoch: ctrl.epoch, ePub: ePub.toString("base64") });
@@ -566,6 +592,9 @@ class DroneSession {
     this.state.kU2D = next.kU2D;
     this.state.kD2U = next.kD2U;
     this.state.epoch = ctrl.epoch;
+    // Fresh key ⇒ fresh per-epoch AEAD budget for both directions.
+    this.state.epochTxCount = 0;
+    this.state.epochRxAttempts = 0;
   }
 
   private sendControl(ctrl: SessionControl): void {
@@ -574,6 +603,14 @@ class DroneSession {
 
   private sendFrame(plaintext: Buffer, chan: "app" | "ctrl" = "app"): void {
     if (!this.state) throw new Error("no session");
+    // Enforce the per-epoch-key encryption budget q_e: tear down before the
+    // (key, IV) space analyzed by the AEAD bound is exceeded. A caller that
+    // needs to keep sending must rekey first (fresh key ⇒ fresh budget).
+    if (this.state.epochTxCount >= maxFramesPerEpochKey()) {
+      this.dispose();
+      throw new Error("epoch frame cap reached — rekey required");
+    }
+    this.state.epochTxCount++;
     const seq = this.state.txSeq++;
     const iv = seqToIv(seq);
     const aad = frameAad(this.state.droneId, "d2u", this.state.epoch, chan, seq);

@@ -60,21 +60,25 @@ export async function attackTokenBearer(): Promise<AttackResult> {
   //   (a) keep the captured sigma_U  — will fail because E_U differs;
   //   (b) forge sigma_U with a random key — will fail ECDSA verify.
   const attackerEph = ephemeralEcdh();
-  const attackerNonce = randBytes(16);
 
-  // Strategy (a): splice captured sigma_U
+  // The attacker REUSES the captured token and its bound nonceU (so the drone's
+  // nonce-desync and single-use guards pass — the token was never delivered, so
+  // its nonce is unburned), and substitutes ONLY its own E_U. This drives the
+  // request all the way to the drone's proof-of-possession check, which is the
+  // defense this scenario advertises; changing nonceU instead would trip the
+  // earlier desync guard and mask the PoP check under an unrelated rejection.
+  //
+  // Strategy (a): splice the captured sigma_U (which bound the ORIGINAL E_U).
   const spliced: HandshakeHello = {
     ...heardHello,
     userPub: attackerEph.pub.toString("base64"),
-    nonceU: attackerNonce.toString("base64"),
-    // leave userSig as captured — it covers the *original* E_U, not the new one
+    // nonceU and userSig kept as captured — sigma_U now covers the wrong E_U.
   };
 
-  // Strategy (b): random forgery
+  // Strategy (b): forge sigma_U with a random key over the attacker's E_U.
   const forgedHello: HandshakeHello = {
     ...heardHello,
     userPub: attackerEph.pub.toString("base64"),
-    nonceU: attackerNonce.toString("base64"),
     userSig: randBytes(64).toString("base64"),
   };
 
@@ -99,18 +103,17 @@ export async function attackTokenBearer(): Promise<AttackResult> {
   const resB = await tryHello(forgedHello);
 
   await h.shutdown();
-  // Score on the security outcome, not on a specific abort string: the attack
-  // is defended iff NEITHER strategy opened a session (a null result means the
-  // drone returned a `finish`, i.e. the handshake progressed). Both the
-  // sigma_U verification and the nonce/token binding are legitimate reasons
-  // the drone can refuse; coupling PASS to one exact reason string would make
-  // the test flip on a benign refactor of the abort messages.
-  const defended = resA !== null && resB !== null;
+  // The advertised defense is the drone-side proof-of-possession check: sigma_U
+  // must bind the sender's own E_U under the pinned sk_U. Assert BOTH strategies
+  // are refused SPECIFICALLY there ("invalid user signature on hello"), so an
+  // earlier unrelated abort (e.g. nonce desync) cannot be scored as this defense.
+  const pop = /invalid user signature on hello/;
+  const defended = resA !== null && resB !== null && pop.test(resA) && pop.test(resB);
   return {
     name: "bearer-token replay with attacker's own e_U (no sk_U)",
     defended,
     detail: defended
-      ? `drone rejected both splice and forge attempts (${resA} / ${resB})`
-      : `token-bearer replay SUCCEEDED — spliced=${resA}, forged=${resB}`,
+      ? `drone rejected both splice and forge at the PoP check (${resA} / ${resB})`
+      : `token-bearer replay reached wrong stage — spliced=${resA}, forged=${resB}`,
   };
 }

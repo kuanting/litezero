@@ -12,6 +12,37 @@ export const AUTH_TOKEN_TTL_MS = 30_000;
 // Maximum out-of-order session frames we will accept (sliding window).
 export const SESSION_REPLAY_WINDOW = 64;
 
+// Hard cap on the number of AES-GCM operations performed under a single
+// directional key within one epoch. The session-layer AEAD bound in the paper
+// (§ "Session-layer AEAD bound") is stated for q_e, q_d <= 2^30 per direction
+// per epoch; this constant enforces that premise operationally. It counts
+// BOTH encryption calls (send) and decryption ATTEMPTS (including rejected
+// ciphertexts), each against its own counter. When a counter reaches the cap
+// the session tears down (or must rekey) rather than continue under a key that
+// has exceeded its analyzed budget.
+//
+// Overridable via LZ_MAX_FRAMES_PER_EPOCH_KEY so the boundary tests can drive a
+// tiny cap without sending 2^30 frames. Read through maxFramesPerEpochKey()
+// (not cached) so an in-process test can set it before opening a session.
+export const MAX_FRAMES_PER_EPOCH_KEY = 2 ** 30;
+
+export function maxFramesPerEpochKey(): number {
+  const v = Number(process.env.LZ_MAX_FRAMES_PER_EPOCH_KEY);
+  return Number.isSafeInteger(v) && v > 0 ? v : MAX_FRAMES_PER_EPOCH_KEY;
+}
+
+// Sequence-number VALIDITY is deliberately decoupled from the per-epoch AEAD
+// budget. A wire sequence number is valid iff it is a non-negative safe integer
+// representable in the 64-bit IV format (seqToIv writes a BigUInt64BE); a safe
+// integer is < 2^53 < 2^64, so this always fits. The per-epoch q_e/q_d budget is
+// enforced SEPARATELY by the epoch counters (epochTxCount/epochRxAttempts),
+// because txSeq is monotone ACROSS epochs while the budget resets on each rekey:
+// tying validity to the budget would wrongly reject fresh-epoch frames once the
+// cumulative counter passed the cap (the epoch's fresh key would be unusable).
+export function isValidSeq(seq: unknown): seq is number {
+  return typeof seq === "number" && Number.isSafeInteger(seq) && seq >= 0;
+}
+
 // Maximum number of half-open handshakes (hello accepted, ack not yet received)
 // the drone will hold at once. When the bound is reached, the oldest half-open
 // handshake is evicted (its pending key material zeroized and its transport

@@ -108,6 +108,21 @@ export async function attackReplayFrame(): Promise<AttackResult> {
     }
   });
 
+  // Observe the drone's reply to a replayed frame on the SAME live connection.
+  let reply = "";
+  let sawReply: (() => void) | null = null;
+  tapped.onMessage((s) => {
+    try {
+      const m = JSON.parse(s);
+      if (m.kind === "error") {
+        reply = s;
+        sawReply?.();
+      }
+    } catch {
+      /* ignore */
+    }
+  });
+
   const session = await runUserHandshake({
     identity: h.userIdentity,
     droneId: h.droneId,
@@ -119,30 +134,30 @@ export async function attackReplayFrame(): Promise<AttackResult> {
     void session.send(Buffer.from("ARM"));
   });
 
-  // Now replay the captured frame on a fresh connection — the drone has no
-  // session state on the new link so it must reject it.
-  const replayLink = h.connectToDrone();
-  let reply = "";
+  // Replay the captured frame back INTO the established session (same link, live
+  // drone state). This exercises the actual in-session anti-replay mechanism —
+  // the monotone-seq sliding window — rather than a "no session" rejection on a
+  // fresh connection. The drone has already accepted this seq, so the replay
+  // must be rejected by the window, not by AEAD or by a missing session.
   const doneP = new Promise<void>((resolve) => {
-    replayLink.onMessage((s) => {
-      reply = s;
-      resolve();
-    });
+    sawReply = resolve;
   });
-  replayLink.send(capturedFrame!);
+  tapped.send(capturedFrame!);
   await doneP;
-  replayLink.close();
 
   session.close();
   await h.shutdown();
 
   const parsed = JSON.parse(reply) as { kind: string; reason?: string };
-  const defended = parsed.kind === "error";
+  // Assert the rejection came from the replay/seq-window logic specifically, so
+  // an unrelated abort cannot count as this defense.
+  const defended =
+    parsed.kind === "error" && /replay|seq/i.test(parsed.reason ?? "");
   return {
-    name: "replay of captured session frame",
+    name: "replay of captured session frame (in-session window)",
     defended,
     detail: defended
-      ? `drone rejected: ${parsed.reason}`
-      : "drone accepted a replayed session frame — BAD",
+      ? `drone's replay window rejected the re-sent frame: ${parsed.reason}`
+      : `frame replay reached wrong stage (kind=${parsed.kind}, reason=${parsed.reason})`,
   };
 }

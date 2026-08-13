@@ -55,6 +55,7 @@ export async function attackPostCompromise(): Promise<AttackResult> {
         userId: h.userIdentity.userId,
         signingKey: rotated.privateKey,
         pinnedDrones: h.userIdentity.pinnedDrones,
+        cloudVerifyKey: h.userIdentity.cloudVerifyKey,
       },
       droneId: h.droneId,
       cloud: inProcessCloudClient(h.cloud),

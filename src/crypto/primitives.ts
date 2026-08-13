@@ -118,6 +118,40 @@ export function ecdhSharedSecret(self: EphemeralKey, peerPub: Buffer): Buffer {
   return self.ecdh.computeSecret(peerPub);
 }
 
+/**
+ * BEST-EFFORT destruction of the private scalar held inside a native ECDH
+ * object. Node's public `crypto` API exposes no guaranteed zeroization of the
+ * private key retained inside an `ECDH`/OpenSSL `EC_KEY`: `createECDH`,
+ * `generateKeys`, and `setPrivateKey` all keep a native BIGNUM copy of the
+ * scalar that a JavaScript `Buffer.fill(0)` cannot reach. We overwrite it by
+ * reassigning the private key to the constant scalar 1 via `setPrivateKey`,
+ * which on common OpenSSL builds releases the previous private BIGNUM through
+ * its clearing free path. This is a mitigation, NOT a guarantee: the timing of
+ * the release and whether the freed memory is scrubbed are OpenSSL/version
+ * dependent, and a copy may already have been made by `computeSecret`.
+ *
+ * A production build that must enforce the forward-secrecy erasure premise of
+ * the proof should use a crypto module with DOCUMENTED key destruction — an
+ * HSM/PKCS#11 session object, or a WebCrypto non-extractable `CryptoKey` whose
+ * lifetime it controls — rather than relying on this best-effort scrub. The
+ * dead-secret lint (which tracks JS bindings, not native object state) cannot
+ * observe this scalar, so we do not claim the simulator proves its erasure.
+ */
+const SCRUB_SCALAR = Buffer.concat([Buffer.alloc(31), Buffer.from([0x01])]);
+export function destroyEcdh(ecdh: ECDH): void {
+  try {
+    ecdh.setPrivateKey(SCRUB_SCALAR);
+  } catch {
+    /* best-effort: some builds recompute/validate on set; ignore failures */
+  }
+}
+
+/** Best-effort native-scalar destruction for an {@link EphemeralKey}. */
+export function destroyEphemeral(self: EphemeralKey): void {
+  destroyEcdh(self.ecdh);
+  self.pub.fill(0);
+}
+
 /* ------------------------------------------------------------------ */
 /* ECDSA P-256 long-term signing keys  (FIPS 186-5)                    */
 /* ------------------------------------------------------------------ */

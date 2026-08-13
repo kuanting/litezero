@@ -48,6 +48,7 @@ async function main() {
     userId: "alice",
     signingKey: userKey.privateKey,
     pinnedDrones: new Map([["drone-alpha", droneEcdhPub]]),
+    cloudVerifyKey: cloud.cloudKey.publicKey,
   };
 
   const droneServer = await wsListen(DRONE_PORT);

@@ -31,12 +31,16 @@ jobs:
         with:
           node-version-file: .nvmrc
 
+      - name: Install pinned dev toolchain
+        # TypeScript + @types/node are declared as devDependencies and pinned in
+        # package-lock.json, so `npm ci` installs the EXACT versions used here and
+        # for reproduction. These are dev-only: the runtime still has zero
+        # dependencies (the "dependencies" object is empty), and node_modules is
+        # gitignored, so the shipped/runtime artifact stays dependency-free.
+        run: npm ci
+
       - name: Typecheck
-        # Install the type-checker into an ephemeral, gitignored node_modules so
-        # tsc can resolve @types/node (compilerOptions.types: ["node"]). --no-save
-        # keeps package.json/lock untouched, so the committed repo stays
-        # zero-dependency. node_modules is never committed (.gitignore).
-        run: npm i --no-save typescript@5 @types/node@24 && npx tsc --noEmit
+        run: npm run typecheck
 
       - name: Dead-secret lint
         run: node --experimental-transform-types --no-warnings scripts/dead-secret-lint.ts
