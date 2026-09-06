@@ -26,40 +26,37 @@ The v1 verification stack had three quiet holes:
 
 ## 2. What is in place now
 
-### 2.1 Machine-checked symbolic model
-A Verifpal model at [`models/litezero.vp`](../models/litezero.vp) encodes
-the v2 protocol: two-branch ECDH with `ikm = (e_D · E_U) ∥ (d_D · E_U)`,
-drone-verified `σ_U^hello` over `(tok ∥ E_U ∥ n_U)`, and cloud-signed
-token binding `pk_U` and `P_D`.
+### 2.1 Machine-checked symbolic models
+Three Verifpal models under [`models/`](../models/) encode the v2 protocol —
+two-branch ECDH with `ikm = (e_D · E_U) ∥ (d_D · E_U)`, drone-verified
+`σ_U^hello` over `(tok ∥ E_U ∥ n_U)`, cloud-signed token binding `pk_U` and
+`P_D`, and the transcript-bound key schedule
+(`HKDF info = master-label ∥ transcript`, added in the 2026-09 major
+revision) — under an active Dolev–Yao attacker. Seven queries in total:
 
-Queries covered:
-
-- session-key confidentiality (`Q1 km`),
-- application-data confidentiality both directions (`Q2 m_u/m_d`),
-- drone → user auth via `macD` (`Q3`),
-- user → drone auth via `macU` and `σ_U` (`Q4 + Q7`),
-- user → cloud auth via `authSig` (`Q5`),
-- nonce freshness (`Q6`).
-
-**v1.1 — continuous-verification rekey (`phase[1]`).** The model now adds an
-in-band epoch rekey: the user and drone exchange fresh ephemeral points
-*inside* the already-authenticated AEAD channel and derive new directional keys
-from the new ephemeral–ephemeral secret. Time is then advanced and the retired
-epoch-0 keys are `leaks`-ed, so the new-epoch material is tested under an
-old-epoch-key compromise. Two queries are added:
-
-- new-epoch key secrecy after old-epoch leak (`Q8 kU2_u`) — intra-session FS,
-- new-epoch app-message confidentiality after old-epoch leak (`Q9 m_u2`).
+- `litezero-auth.vp` (2): user → drone authentication via `σ_U` against the
+  pinned user key; user → cloud authentication of the authorization request.
+- `litezero-secrecy.vp` (3): session MAC-key confidentiality (`km_u`),
+  application-data confidentiality (`m_u`), and user → drone authentication of
+  the finished MAC (`macU`) against an active MITM.
+- `litezero-fs.vp` (2): intra-session forward secrecy across an in-band epoch
+  rekey — fresh ephemeral points are exchanged *inside* the authenticated AEAD
+  channel, time advances via `phase[1]`, the retired epoch-0 keys are
+  `leaks`-ed in `phase[2]`, and new-epoch key (`kU2_u`) and message (`m_u2`)
+  confidentiality must survive.
 
 Run:
 
 ```
-verifpal verify models/litezero.vp
+npm run verifpal        # = verifpal verify models/litezero-{auth,secrecy,fs}.vp
 ```
 
-Expected: all queries hold under the `attacker[active]` setting. (Verifpal must
-be installed separately; if it is absent the symbolic check is *pending* and
-the executable battery below is the operative evidence.)
+Expected: all seven queries hold; the reference output is `models/expected.txt`.
+(**Classic-language Verifpal required; verified under 0.53.0**, the last
+classic release — 0.60+ and 1.x reserve `g`, reject the classic `G^`
+notation, and do not parse the models; the older 0.27.x line parses them but
+is orders of magnitude slower. If verifpal is absent the symbolic check is
+*pending* and the executable battery below is the operative evidence.)
 
 ### 2.2 Capability-based attack battery
 `src/attacks/capabilities.ts` declares fifteen attacker capabilities and
@@ -155,7 +152,7 @@ runtime in addition to the static scan.
 
 | Check | v1 | v2 / v1.1 |
 |---|---|---|
-| Symbolic formal model | none (prose) | Verifpal, 10 queries (incl. `phase[1]` rekey FS) |
+| Symbolic formal model | none (prose) | Verifpal 0.53.0, three models, 7 queries (incl. `phase[1]` rekey FS) |
 | Attack battery style | 7 named scenarios | 21 scenarios organised over 15 capabilities × 6 goals |
 | Carried application protocol | toy strings | real MAVLink v2 (pymavlink wire-compatible), with a MAVLink-injection scenario |
 | Attack battery catches reviewer flaws | no | yes — `stolen-cloud-key`, `token-bearer`, `powerful-attacker`, `replay-and-tamper` |
@@ -199,6 +196,6 @@ npm run attack         # 19/19 battery scenarios defended
 npm run matrix         # 21/21 scenarios defended, 7/7 coverage entries
 npm run mavlink:test   # in-repo MAVLink v2 codec self-test
 npm run lint:secrets   # dead-secret static scanner clean
-verifpal verify models/litezero.vp   # all queries hold (verifpal installed separately)
+npm run verifpal       # all 7 queries hold across the three models (Verifpal 0.53.0, installed separately)
 python3 tools/mavlink_interop_check.py  # optional: pymavlink wire-compat (pip install pymavlink)
 ```

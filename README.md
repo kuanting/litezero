@@ -35,7 +35,12 @@ design defeats every attacker class enumerated in the paper.
   `crypto` library).
 - Optional: `python3` + `pip install pymavlink` for the MAVLink wire-compatibility
   check, [Bun](https://bun.sh) for the cross-runtime benchmark, and
-  [Verifpal](https://verifpal.com) for the symbolic models.
+  [Verifpal](https://verifpal.com) **0.53.0** for the symbolic models —
+  the last release of the classic Verifpal language, and the version the
+  models are verified under. Releases 0.60 and later (including 1.x) reserve
+  `g` and reject the classic `G^` notation, so they do not parse these models;
+  the older 0.27.x line parses them but its pre-rewrite engine is orders of
+  magnitude slower.
 
 ## Quick start
 
@@ -78,7 +83,7 @@ npm run reproduce      # one command: re-runs every experiment in the paper, wri
 | `npm run mavlink:interop` | Byte-compatibility against pymavlink, both directions (`pip install pymavlink` first) |
 | `npm run bench` / `bench:bun` | Microbenchmarks (handshake latency, AEAD seal/open) under Node / Bun |
 | `npm run lint:secrets` | Dead-secret static lint: every secret-producing call must be zeroized in the same function, or carry a documented `@secret-escapes` exemption |
-| `npm run verifpal` | Verify the three Verifpal models (requires `verifpal` on PATH) |
+| `npm run verifpal` | Verify the three Verifpal models (requires `verifpal` **0.53.0** on PATH — releases 0.60+ do not parse the classic language) |
 | `npm run typecheck` | `tsc --noEmit` under `strict: true` |
 | `npm run reproduce` | Re-runs demo + battery + benchmarks with a pinned seed; writes text artifacts and a pass/fail digest to `out/` |
 

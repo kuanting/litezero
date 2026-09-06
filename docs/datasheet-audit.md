@@ -35,7 +35,7 @@ Primary sources:
 | 9 | d_D is never persisted in plaintext; only AES-GCM(KEK, d_D) "black key" is stored | LiteZero Sec 6.1; Secure_IoT_FPGA_Drone Sec 4.2 | Architectural claim; no Xilinx doc to cite. Traced by the simulator in `src/services/drone.ts:55-62` and `src/services/drone.ts:134-162`: plaintext d_D exists only inside an in-RAM Buffer that is `.fill(0)`-zeroized in the same function. | **CONFIRMED by code review** |
 | 10 | KEK regeneration (PUF read + fuzzy-extract + key derive) measured at 3.0 ms ± 0.4 ms on the target board | Secure_IoT_FPGA_Drone Table 3 | Hardware measurement; UG1283 §5.2 quotes "typical PUF-to-key time ≤ 4 ms" for the reference IP. Our 3.0 ms is inside that envelope. | **CONFIRMED** (measurement + datasheet envelope agree) |
 | 11 | AES-256-GCM per-block cost 13.9 μs (single 16 B block, post-first-block amortized throughput > 600 Mbps) | Secure_IoT_FPGA_Drone Table 3 | UG1085 §12.4.1 quotes "up to 850 Mbps streaming throughput". Measured 13.9 μs for a cold 16 B block is consistent with a setup-heavy per-frame cost plus the spec'd streaming rate. | **CONFIRMED** (measured ≤ datasheet ceiling) |
-| 12 | Session key Ks and MAC key Km derived from two-branch ECDH output via HKDF-SHA256 with salt = nonce_U ∥ nonce_D | Both papers, Algorithm 1 | RFC 5869 §2.2 "salt is a non-secret random value"; §2.3 "extract-then-expand"; SP 800-56A §5.8 "key-derivation function may be HKDF" | **CONFIRMED** |
+| 12 | Session key Ks and MAC key Km derived from two-branch ECDH output via HKDF-SHA256 with salt = nonce_U ∥ nonce_D and info = master-label ∥ transcript hash (transcript-bound key schedule, 2026-09 revision) | Both papers, Algorithm 1 | RFC 5869 §2.2 "salt is a non-secret random value"; §2.3 "extract-then-expand"; §3.2 info "binds the derived key material to application- and context-specific information"; SP 800-56A §5.8 "key-derivation function may be HKDF" | **CONFIRMED** |
 | 13 | AES-GCM with 96-bit IV = (4 zero bytes ∥ 8-byte BE sequence number), monotonically increasing, with IV never reused for a given key | Both papers, Sec 4.4 | SP 800-38D §8.2.1 "The IV may be constructed using the deterministic construction: fixed_field ∥ invocation_field" | **CONFIRMED** |
 | 14 | AES-GCM AAD binds (droneId ∥ direction ∥ seq) so a frame from (u→d) at seq=N cannot be replayed as a (d→u) frame | Both papers, Sec 4.4 | SP 800-38D §7.1 "AAD is authenticated but not encrypted"; construction is the same one used in TLS 1.3 record layer (RFC 8446 §5.2) | **CONFIRMED** |
 | 15 | Two-branch key-agreement reduces to Gap-DH on either Z_1 = e_D · E_U or Z_2 = d_D · E_U being hard | LiteZero Sec 5 | Folklore; tracks the Noise-XK analysis (Kobeissi et al., EuroS&P 2019) where a static-ephemeral branch is mixed into the HKDF salt. | **CONFIRMED** — we cite Noise-XK for the reduction. |
@@ -48,7 +48,7 @@ Primary sources:
 ## What this audit is NOT
 
 - Not a replacement for real silicon validation. The measurements (#10, #11, #16, #17) come from our instrumented firmware on a real Zynq UltraScale+ ZCU104 board; this table only checks that the measured numbers are compatible with the Xilinx datasheet envelope. A separate bring-up report documents the measurement methodology.
-- Not a formal security proof. That lives in the LiteZero paper Sec V and the Verifpal model at `models/litezero.vp`.
+- Not a formal security proof. That lives in the LiteZero paper Sec V and the three Verifpal models under `models/` (Verifpal 0.53.0).
 - Not a code audit. That lives in `src/` + `scripts/run-attacks.ts`.
 
 ## Change log
