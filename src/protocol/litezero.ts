@@ -95,8 +95,12 @@ export function transcriptHash(t: TranscriptInput): Buffer {
 }
 
 /**
- * From the ECDH secret + nonces, derive the directional session keys and the
- * key-confirmation MAC key. The 64-byte HKDF master is split into a session
+ * From the ECDH secret + nonces + transcript hash, derive the directional
+ * session keys and the key-confirmation MAC key. The transcript hash enters
+ * the HKDF-Expand info alongside the fixed master label, so two sessions with
+ * different transcripts cannot derive the same keys by construction (the
+ * TLS 1.3 pattern); the finished MACs over the transcript remain as explicit
+ * key confirmation. The 64-byte HKDF master is split into a session
  * root (ks) and a MAC key (km); ks seeds the two directional subkeys and is
  * then discarded. The master (root ks included) is zeroized before returning,
  * and only an independent copy of km escapes — so the caller only has to wipe
@@ -106,9 +110,11 @@ export function deriveSessionKeys(
   ecdhSecret: Buffer,
   nonceU: Buffer,
   nonceD: Buffer,
+  transcript: Buffer,
 ): { km: Buffer; kU2D: Buffer; kD2U: Buffer } {
   const salt = Buffer.concat([nonceU, nonceD]);
-  const master = hkdf(ecdhSecret, salt, `${KDF_LABEL}/master`, 64);
+  const info = Buffer.concat([Buffer.from(`${KDF_LABEL}/master`, "utf8"), transcript]);
+  const master = hkdf(ecdhSecret, salt, info, 64);
   const ks = master.subarray(0, 32);
   // deriveSubkey runs HKDF again, so the subkeys are independent buffers and
   // ks itself never needs to leave this function.

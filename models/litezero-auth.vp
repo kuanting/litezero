@@ -1,3 +1,11 @@
+// LiteZero symbolic model for Verifpal — authentication queries:
+// the drone accepts a hello only if the pinned user signed it, and the cloud
+// authorizes only requests signed by the registered user.
+//
+// Run (outside this repo): `verifpal verify models/litezero-auth.vp`.
+// Requires classic-language Verifpal, verified under 0.53.0 (the last classic
+// release); 0.60+ and 1.x reject the classic G^ notation and do not parse this file.
+
 attacker[active]
 principal Cloud[
     knows private sk_C

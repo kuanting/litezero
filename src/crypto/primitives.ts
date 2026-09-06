@@ -211,11 +211,12 @@ export function hmacSha256(key: Buffer, msg: Buffer): Buffer {
 export function hkdf(
   ikm: Buffer,
   salt: Buffer,
-  info: string,
+  info: string | Buffer,
   length = 32,
 ): Buffer {
+  const infoBuf = typeof info === "string" ? Buffer.from(info, "utf8") : info;
   // Node's hkdfSync returns an ArrayBuffer — convert to Buffer.
-  const ab = hkdfSync("sha256", ikm, salt, Buffer.from(info, "utf8"), length);
+  const ab = hkdfSync("sha256", ikm, salt, infoBuf, length);
   return Buffer.from(ab);
 }
 

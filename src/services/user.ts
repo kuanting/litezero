@@ -240,14 +240,8 @@ export async function runUserHandshake(params: {
   // in services/drone.ts and closes a dead-secret-lint finding.
   z1.fill(0);
   z2.fill(0);
-  const { km, kU2D, kD2U } = deriveSessionKeys(ikm, nonceU, nonceD);
-  ikm.fill(0);
-  // e_U fed both DH branches and is not needed again; best-effort scrub of the
-  // native ECDH scalar now (see destroyEcdh — the exported JS branch buffers
-  // above are wiped, but the OpenSSL EC_KEY retains its own copy of e_U).
-  // eph.pub is public and still needed for the transcript below, so it stays.
-  destroyEcdh(eph.ecdh);
-
+  // The transcript is an HKDF input (the key schedule binds the session keys
+  // to the full handshake transcript), so compute it before key derivation.
   const tokenBytes = canonicalToken(hello.authToken);
   const transcript = transcriptHash({
     tokenBytes,
@@ -258,6 +252,13 @@ export async function runUserHandshake(params: {
     dronePub,
     nonceD,
   });
+  const { km, kU2D, kD2U } = deriveSessionKeys(ikm, nonceU, nonceD, transcript);
+  ikm.fill(0);
+  // e_U fed both DH branches and is not needed again; best-effort scrub of the
+  // native ECDH scalar now (see destroyEcdh — the exported JS branch buffers
+  // above are wiped, but the OpenSSL EC_KEY retains its own copy of e_U).
+  // eph.pub is public and already captured by the transcript above.
+  destroyEcdh(eph.ecdh);
 
   const expectedMacD = macWithLabel(km, transcript, "drone");
   if (!timingSafeEqual(expectedMacD, Buffer.from(fin.macD, "base64"))) {

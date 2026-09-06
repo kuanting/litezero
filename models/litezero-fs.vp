@@ -15,8 +15,14 @@
 //   2. User proof-of-possession: userSig = SIGN(sk_U, H(tok || E_U || n_U))
 //      is consumed BY THE DRONE, not only by the cloud. So a stolen sk_C
 //      alone is insufficient to start a fresh session against the drone.
+//   3. Transcript-bound key schedule (2026-09 major revision): the HKDF info
+//      is CONCAT(master_info, transcript), so sessions with different
+//      transcripts cannot derive equal keys by construction — matching
+//      deriveSessionKeys in src/protocol/litezero.ts.
 //
-// Run (outside this repo): `verifpal verify models/litezero.vp`.
+// Run (outside this repo): `verifpal verify models/litezero-fs.vp`.
+// Requires classic-language Verifpal, verified under 0.53.0 (the last classic
+// release); 0.60+ and 1.x reject the classic G^ notation and do not parse this file.
 
 attacker[active]
 
@@ -110,12 +116,13 @@ principal Drone[
     ss2_d = epk_U^d_D         // Z_2 = d_D * E_U  (static-ephemeral, PUF branch)
     ikm_d = CONCAT(ss1_d, ss2_d)
     salt_d = CONCAT(nonceU, nonceD)
-    // HKDF info is the fixed master label, matching deriveSessionKeys in
-    // src/protocol/litezero.ts (info = "litezero/v1/master").
-    km_d, kU_d, kD_d = HKDF(salt_d, ikm_d, master_info)
     // Transcript matches transcriptHash in src/protocol/litezero.ts exactly:
     // token || cloudSig || E_U || nonceU || userSig || E_D || nonceD.
     transcript_d = CONCAT(CONCAT(token, cloudSig, epk_U, nonceU, userSig), epk_D, nonceD)
+    // HKDF info binds the master label AND the transcript hash, matching
+    // deriveSessionKeys in src/protocol/litezero.ts
+    // (info = "litezero/v1/master" || transcript).
+    km_d, kU_d, kD_d = HKDF(salt_d, ikm_d, CONCAT(master_info, transcript_d))
     // MAC domain labels are the literal strings "drone"/"user" (macWithLabel).
     macD = MAC(km_d, CONCAT(transcript_d, drone_label))
 ]
@@ -129,8 +136,8 @@ principal User[
     ss2_u = pk_D_static^esk_U
     ikm_u = CONCAT(ss1_u, ss2_u)
     salt_u = CONCAT(nonceU, nonceD)
-    km_u, kU_u, kD_u = HKDF(salt_u, ikm_u, master_info)
     transcript_u = CONCAT(CONCAT(token, cloudSig, epk_U, nonceU, userSig), epk_D, nonceD)
+    km_u, kU_u, kD_u = HKDF(salt_u, ikm_u, CONCAT(master_info, transcript_u))
     macD_u = MAC(km_u, CONCAT(transcript_u, drone_label))
     _ = ASSERT(macD, macD_u)?
     macU = MAC(km_u, CONCAT(transcript_u, user_label))
@@ -225,19 +232,12 @@ principal Drone[
     leaks kD_d
 ]
 
-/* =================================================================
- * Security queries (v2 + continuous verification)
- * =================================================================
- *   Q1  km confidentiality                     — session-key secrecy
- *   Q2  app message confidentiality (both dirs)
- *   Q3  Drone  -> User authentication via macD
- *   Q4  User   -> Drone authentication via macU and userSig
- *   Q5  User   -> Cloud authentication via authSig
- *   Q6  nonceU freshness                       — replay resistance (hello)
- *   Q7  Drone  -> User binding of userSig      — drone consumes sk_U PoP
- *   Q8  new-epoch key secrecy AFTER old-epoch key leak — intra-session FS
- *   Q9  new-epoch app message confidentiality          — intra-session FS
- */
+// =================================================================
+// Security queries — intra-session forward secrecy
+// =================================================================
+//   new-epoch key secrecy AFTER old-epoch key leak    (kU2_u)
+//   new-epoch app message confidentiality after leak  (m_u2)
+// (Classic Verifpal 0.27.x parsers support only //-style comments.)
 queries[
     confidentiality? kU2_u
     confidentiality? m_u2

@@ -310,9 +310,9 @@ class DroneSession {
     z2.fill(0);
 
     const nonceD = randBytes(16);
-    const { km, kU2D, kD2U } = deriveSessionKeys(ikm, nonceU, nonceD);
-    ikm.fill(0);
-
+    // The transcript is computed before key derivation because it is an HKDF
+    // input: the session keys are bound to the full handshake transcript in
+    // the key schedule itself, not only via the finished MACs.
     const transcript = transcriptHash({
       tokenBytes,
       cloudSig: Buffer.from(msg.cloudSig, "base64"),
@@ -322,6 +322,8 @@ class DroneSession {
       dronePub,
       nonceD,
     });
+    const { km, kU2D, kD2U } = deriveSessionKeys(ikm, nonceU, nonceD, transcript);
+    ikm.fill(0);
     const macD = macWithLabel(km, transcript, "drone");
 
     const out: HandshakeFinish = {

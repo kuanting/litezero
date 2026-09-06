@@ -29,9 +29,15 @@ import { blackKeyAad } from "../services/drone.ts";
 import { pufRegenerate } from "../crypto/puf.ts";
 import { tapTransport } from "./_tap.ts";
 import { aesGcmDecrypt } from "../crypto/primitives.ts";
-import { deriveSessionKeys, frameAad } from "../protocol/litezero.ts";
+import {
+  canonicalToken,
+  deriveSessionKeys,
+  frameAad,
+  transcriptHash,
+} from "../protocol/litezero.ts";
 import { createECDH } from "node:crypto";
 import type { AttackResult } from "./types.ts";
+import type { AuthToken } from "../protocol/messages.ts";
 
 interface CapturedFrame {
   dir: "u2d" | "d2u";
@@ -68,6 +74,13 @@ export async function attackForwardSecrecy(): Promise<AttackResult> {
   let eUPub: Buffer | null = null; // E_U from the hello
   let nonceU: Buffer | null = null;
   let nonceD: Buffer | null = null;
+  // The remaining transcript fields are also plain wire data: the attacker
+  // needs them because the key schedule folds the transcript hash into the
+  // HKDF info, so any candidate derivation must use the real transcript.
+  let authToken: AuthToken | null = null;
+  let cloudSig: Buffer | null = null;
+  let userSig: Buffer | null = null;
+  let eDPub: Buffer | null = null; // E_D from the finish
   const frames: CapturedFrame[] = [];
   for (const raw of wire) {
     let m: Record<string, unknown>;
@@ -79,8 +92,12 @@ export async function attackForwardSecrecy(): Promise<AttackResult> {
     if (m.kind === "hello") {
       eUPub = Buffer.from(m.userPub as string, "base64");
       nonceU = Buffer.from(m.nonceU as string, "base64");
+      authToken = m.authToken as AuthToken;
+      cloudSig = Buffer.from(m.cloudSig as string, "base64");
+      userSig = Buffer.from(m.userSig as string, "base64");
     } else if (m.kind === "finish") {
       nonceD = Buffer.from(m.nonceD as string, "base64");
+      eDPub = Buffer.from(m.dronePub as string, "base64");
     } else if (m.kind === "data") {
       frames.push({
         dir: m.dir as "u2d" | "d2u",
@@ -94,7 +111,10 @@ export async function attackForwardSecrecy(): Promise<AttackResult> {
     }
   }
 
-  if (!eUPub || !nonceU || !nonceD || frames.length === 0) {
+  if (
+    !eUPub || !nonceU || !nonceD || !authToken || !cloudSig || !userSig ||
+    !eDPub || frames.length === 0
+  ) {
     await h.shutdown();
     return {
       name: "forward-secrecy leak (long-term keys AFTER session)",
@@ -102,6 +122,17 @@ export async function attackForwardSecrecy(): Promise<AttackResult> {
       detail: "harness failed to capture handshake / frames",
     };
   }
+
+  // Reassemble the (public) transcript hash exactly as the endpoints do.
+  const transcript = transcriptHash({
+    tokenBytes: canonicalToken(authToken),
+    cloudSig,
+    userPub: eUPub,
+    nonceU,
+    userSig,
+    dronePub: eDPub,
+    nonceD,
+  });
 
   // Leak d_D: recover the drone's static ECDH scalar exactly as the drone does
   // — regenerate the KEK from the PUF and unseal the black key.
@@ -134,7 +165,7 @@ export async function attackForwardSecrecy(): Promise<AttackResult> {
   let anyDecoded = false;
   let winningDetail = "";
   for (const ikm of ikmCandidates) {
-    const { km, kU2D, kD2U } = deriveSessionKeys(ikm, nonceU, nonceD);
+    const { km, kU2D, kD2U } = deriveSessionKeys(ikm, nonceU, nonceD, transcript);
     km.fill(0);
     for (const f of frames) {
       const key = f.dir === "u2d" ? kU2D : kD2U;
