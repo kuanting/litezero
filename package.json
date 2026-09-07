@@ -19,7 +19,7 @@
     "bench:bun": "bun scripts/bench.ts",
     "reproduce": "bash scripts/reproduce.sh",
     "typecheck": "tsc --noEmit",
-    "verifpal": "for m in auth secrecy fs; do verifpal verify models/litezero-$m.vp || exit 1; done",
+    "verifpal": "for m in auth secrecy kci fs; do verifpal verify models/litezero-$m.vp || exit 1; done",
     "test": "node --experimental-transform-types --no-warnings scripts/run-attacks.ts"
   },
   "devDependencies": {

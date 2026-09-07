@@ -66,7 +66,7 @@ npm run reproduce      # one command: re-runs every experiment in the paper, wri
 | `src/attacks/` | 19 attack scenarios (MITM, replay, KCI, UKS, stolen cloud key, captured drone, MAVLink injection, ...) plus the capability matrix |
 | `src/transport/` | In-process and WebSocket transports |
 | `scripts/` | Entry points for every npm script, incl. `reproduce.sh` and the dead-secret lint |
-| `models/` | Verifpal symbolic models (authentication, secrecy, intra-session forward secrecy) with field names/order matching `src/protocol/messages.ts` |
+| `models/` | Verifpal symbolic models (authentication, secrecy, key-compromise impersonation, intra-session forward secrecy) with field names/order matching `src/protocol/messages.ts` |
 | `docs/` | `robust-verification.md` (verification methodology), `datasheet-audit.md` (20-row spec-vs-datasheet audit of every hardware claim) |
 | `tools/` | `mavlink_interop_check.py` — byte-level interop check against reference pymavlink |
 
@@ -93,12 +93,13 @@ The paper's claim is not just "the protocol is proven secure" but "the
 implementation is kept honest with the proof". Four independent layers enforce
 that:
 
-1. **Verifpal symbolic models** (`models/`) — seven queries (session-key
-   secrecy, key confirmation, user and authorization authentication, and two
-   intra-session forward-secrecy queries across an in-band rekey) verify under
-   an active Dolev-Yao attacker. Message names and field order are identical to
-   the TypeScript types, so model and code can be audited against each other by
-   inspection.
+1. **Verifpal symbolic models** (`models/`) — eight queries (session-key
+   secrecy, key confirmation, user and authorization authentication, drone
+   authentication under a pre-handshake leak of `sk_U` — key-compromise
+   impersonation — and two intra-session forward-secrecy queries across an
+   in-band rekey) verify under an active Dolev-Yao attacker. Message names and
+   field order are identical to the TypeScript types, so model and code can be
+   audited against each other by inspection.
 2. **Seeded attack battery + capability matrix** (`src/attacks/`) — every
    scenario instantiates a full protocol run and injects active-attacker
    behavior; each defense traces to a specific game hop, freshness rule, or

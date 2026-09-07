@@ -1,0 +1,153 @@
+// LiteZero symbolic model for Verifpal — key-compromise impersonation (KCI).
+//
+// Premise: the attacker holds the user's long-term signing key sk_U from the
+// start (leaks sk_U in the first User block). With sk_U the attacker can
+// impersonate the USER to the drone — that is the allowed consequence of the
+// compromise. KCI resistance is about the converse: the attacker must still
+// be unable to impersonate the DRONE to the honest user, because macD is
+// keyed by km which derives from the two-branch secret
+// ikm = (e_D * E_U) || (d_D * E_U), and the static PUF-anchored branch
+// requires d_D. The single query checks exactly that: the honest user
+// accepts macD only from the genuine drone, for this exact exchange.
+//
+// The model is the secrecy model (same wire format, same transcript-bound
+// key schedule) with the sk_U leak added and the query narrowed to drone
+// authentication; the post-handshake application-data phase is dropped as
+// irrelevant to KCI.
+//
+// Run (outside this repo): `verifpal verify models/litezero-kci.vp`.
+// Requires classic-language Verifpal, verified under 0.53.0 (the last classic
+// release); 0.60+ and 1.x reject the classic G^ notation and do not parse this file.
+
+attacker[active]
+
+principal Cloud[
+    knows private sk_C
+    pk_C = G^sk_C
+]
+
+principal User[
+    knows private sk_U
+    pk_U = G^sk_U
+    // KCI premise: the user's long-term signing key is in the attacker's
+    // hands BEFORE the handshake. Everything below runs under that leak.
+    leaks sk_U
+]
+
+principal Drone[
+    knows private d_D
+    pk_D_static = G^d_D
+]
+
+// ---- Enrollment / provisioning (authentic, out-of-band) ----
+// Guarded constants [x]: the attacker can observe but not substitute them.
+// [pk_U] -> Drone is the Option A user verify key pinned at provisioning;
+// [pk_D_static] -> User is the owner-verified pinned P_D. Both mirror
+// src/services/drone.ts (authorizedUserKeys) and src/services/user.ts
+// (pinnedDrones).
+Cloud -> User: [pk_C]
+Cloud -> Drone: [pk_C]
+User -> Cloud: [pk_U]
+User -> Drone: [pk_U]
+Drone -> Cloud: [pk_D_static]
+Drone -> User: [pk_D_static]
+
+principal User[
+    generates esk_U
+    generates nonceU
+    knows public uid, did
+    knows public ts
+    epk_U = G^esk_U
+    h_auth = HASH(uid, did, nonceU, ts)
+    authSig = SIGN(sk_U, h_auth)
+]
+
+// ---- Phase 1: User <-> Cloud authorization ----
+User -> Cloud: nonceU, authSig
+
+principal Cloud[
+    knows public uid, did, ts
+    h_auth_c = HASH(uid, did, nonceU, ts)
+    _ = SIGNVERIF(pk_U, h_auth_c, authSig)?
+    // The drone's static public key was registered at enrollment; binding
+    // it into the token means the user consumes an authenticated P_D, not a
+    // network-supplied one.
+    generates iat
+    generates exp
+    // Cloud-signed token now carries pk_U AND P_D — the two public values
+    // the drone and user respectively need to reach the session secret.
+    token_core = CONCAT(uid, did, nonceU, iat, exp)
+    token = CONCAT(token_core, pk_U, pk_D_static)
+    cloudSig = SIGN(sk_C, token)
+]
+Cloud -> User: token, cloudSig
+
+// ---- Phase 2: User signs the hello payload for the drone ----
+principal User[
+    _ = SIGNVERIF(pk_C, token, cloudSig)?
+    // sigma_U: User proof-of-possession consumed by the DRONE, binding
+    // (tok, E_U, n_U) so the sig is not splice-able onto another session.
+    hello_digest = HASH(token, epk_U, nonceU)
+    userSig = SIGN(sk_U, hello_digest)
+]
+
+User -> Drone: token, cloudSig, epk_U, nonceU, userSig
+
+// ---- Phase 3: Drone verifies sigma_C AND sigma_U, then computes two DH branches ----
+principal Drone[
+    // master_info / drone_label / user_label are the fixed ASCII
+    // domain-separation constants used by the implementation
+    // ("litezero/v1/master", "drone", "user"); modelled as public constants.
+    knows public uid, did, master_info, drone_label, user_label
+    // (1) Cloud signature
+    _ = SIGNVERIF(pk_C, token, cloudSig)?
+    // (2) User PoP signature — verified against the user verify key pk_U
+    // PINNED at provisioning (Option A); the token's copy is convenience.
+    hello_digest_d = HASH(token, epk_U, nonceU)
+    _ = SIGNVERIF(pk_U, hello_digest_d, userSig)?
+    // (3) Two DH branches
+    generates esk_D
+    generates nonceD
+    epk_D = G^esk_D
+    ss1_d = epk_U^esk_D       // Z_1 = e_D * E_U  (ephemeral-ephemeral)
+    ss2_d = epk_U^d_D         // Z_2 = d_D * E_U  (static-ephemeral, PUF branch)
+    ikm_d = CONCAT(ss1_d, ss2_d)
+    salt_d = CONCAT(nonceU, nonceD)
+    // Transcript matches transcriptHash in src/protocol/litezero.ts exactly:
+    // token || cloudSig || E_U || nonceU || userSig || E_D || nonceD.
+    transcript_d = CONCAT(CONCAT(token, cloudSig, epk_U, nonceU, userSig), epk_D, nonceD)
+    // HKDF info binds the master label AND the transcript hash, matching
+    // deriveSessionKeys in src/protocol/litezero.ts
+    // (info = "litezero/v1/master" || transcript).
+    km_d, kU_d, kD_d = HKDF(salt_d, ikm_d, CONCAT(master_info, transcript_d))
+    // MAC domain labels are the literal strings "drone"/"user" (macWithLabel).
+    macD = MAC(km_d, CONCAT(transcript_d, drone_label))
+]
+Drone -> User: epk_D, nonceD, macD
+
+// ---- Phase 4: User completes the handshake using BOTH branches ----
+principal User[
+    knows public master_info, drone_label, user_label
+    // Z_1 user side = e_U * E_D; Z_2 user side = e_U * P_D_static.
+    ss1_u = epk_D^esk_U
+    ss2_u = pk_D_static^esk_U
+    ikm_u = CONCAT(ss1_u, ss2_u)
+    salt_u = CONCAT(nonceU, nonceD)
+    transcript_u = CONCAT(CONCAT(token, cloudSig, epk_U, nonceU, userSig), epk_D, nonceD)
+    km_u, kU_u, kD_u = HKDF(salt_u, ikm_u, CONCAT(master_info, transcript_u))
+    macD_u = MAC(km_u, CONCAT(transcript_u, drone_label))
+    _ = ASSERT(macD, macD_u)?
+    macU = MAC(km_u, CONCAT(transcript_u, user_label))
+]
+User -> Drone: macU
+
+principal Drone[
+    macU_d = MAC(km_d, CONCAT(transcript_d, user_label))
+    _ = ASSERT(macU, macU_d)?
+]
+
+// KCI query: with sk_U leaked, can the attacker make the honest user accept
+// a macD the genuine drone never sent for this exchange? Pass = KCI resisted.
+queries[
+    authentication? Drone -> User: macD
+]

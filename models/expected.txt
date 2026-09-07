@@ -9,6 +9,10 @@
      Pass ✓ confidentiality? m_u
      Pass ✓ authentication? User -> Drone: macu
      Pass ✓ All 3 queries pass.
+### litezero-kci ###
+│  All 1 queries pass | 6297 deductions | 00:04:53 │
+     Pass ✓ authentication? Drone -> User: macd
+     Pass ✓ All 1 queries pass.
 ### litezero-fs ###
 │  All 2 queries pass | 8158 deductions | 00:15:01 │
      Pass ✓ confidentiality? ku2_u
