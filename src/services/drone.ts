@@ -461,6 +461,11 @@ class DroneSession {
     if (this.state.rxWindow.has(msg.seq)) return this.abort("replay");
 
     const chan = msg.chan ?? "app";
+    // The IV is a deterministic function of seq; a record whose transmitted IV
+    // is anything else is rejected before decryption, so the receiver never
+    // verifies under an IV outside the analyzed counter sequence.
+    const rxIv = Buffer.from(msg.iv, "base64");
+    if (!rxIv.equals(seqToIv(msg.seq))) return this.abort("iv does not match seq");
     const aad = frameAad(this.state.droneId, "u2d", msg.epoch, chan, msg.seq);
     // @secret-escapes: pt is application-layer plaintext (a command/telemetry
     // payload), not a key; it is handed to the control handler or onCommand
@@ -470,7 +475,7 @@ class DroneSession {
       pt = aesGcmDecrypt(
         this.state.kU2D,
         {
-          iv: Buffer.from(msg.iv, "base64"),
+          iv: rxIv,
           ct: Buffer.from(msg.ct, "base64"),
           tag: Buffer.from(msg.tag, "base64"),
         },

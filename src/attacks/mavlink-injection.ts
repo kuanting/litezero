@@ -19,7 +19,7 @@
 import { bootstrap, inProcessCloudClient } from "../scenarios/bootstrap.ts";
 import { runUserHandshake } from "../services/user.ts";
 import { tapTransport } from "./_tap.ts";
-import { randBytes } from "../crypto/primitives.ts";
+import { randBytes, seqToIv } from "../crypto/primitives.ts";
 import { FlightStack, gcsMission } from "../mavlink/flight.ts";
 import {
   createParser,
@@ -117,7 +117,9 @@ export async function attackMavlinkInjection(): Promise<AttackResult> {
         epoch: 0,
         chan: "app",
         seq: 1000, // unused, in-window, valid — forces the AEAD check, not replay
-        iv: randBytes(12).toString("base64"),
+        // The IV format is public (enc(seq)); a real attacker uses the right
+        // one, so the defense exercised here is the AEAD tag, not the IV check.
+        iv: seqToIv(1000).toString("base64"),
         ct: killFrame.toString("base64"), // raw MAVLink as the "ciphertext"
         tag: randBytes(16).toString("base64"),
       }),

@@ -229,6 +229,10 @@ export function deriveSubkey(masterKey: Buffer, label: string, length = 32): Buf
 /* AES-256-GCM  (NIST SP 800-38D)                                      */
 /* ------------------------------------------------------------------ */
 
+/** GCM parameters fixed by the protocol (SP 800-38D: 96-bit IV, 128-bit tag). */
+export const GCM_IV_BYTES = 12;
+export const GCM_TAG_BYTES = 16;
+
 export interface GcmCiphertext {
   iv: Buffer; // 12 bytes — SP 800-38D Sec.~8.2
   ct: Buffer;
@@ -256,7 +260,12 @@ export function aesGcmDecrypt(
   aad: Buffer,
 ): Buffer {
   if (key.length !== 32) throw new Error("AES-256-GCM key must be 32 bytes");
-  const d = createDecipheriv("aes-256-gcm", key, frame.iv);
+  // Enforce the analyzed parameters BEFORE touching the cipher: a 96-bit IV and
+  // the full 128-bit tag. OpenSSL otherwise accepts correctly truncated tags
+  // (12, 8, 4 bytes), which would void any forgery bound stated for tau = 128.
+  if (frame.iv.length !== GCM_IV_BYTES) throw new Error("GCM IV must be 12 bytes");
+  if (frame.tag.length !== GCM_TAG_BYTES) throw new Error("GCM tag must be 16 bytes");
+  const d = createDecipheriv("aes-256-gcm", key, frame.iv, { authTagLength: GCM_TAG_BYTES });
   if (aad.length > 0) d.setAAD(aad);
   d.setAuthTag(frame.tag);
   return Buffer.concat([d.update(frame.ct), d.final()]);

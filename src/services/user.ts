@@ -330,13 +330,17 @@ export async function runUserHandshake(params: {
       if (m.seq <= rxLastSeq - SESSION_REPLAY_WINDOW) return;
       if (rxWindow.has(m.seq)) return;
       const chan = m.chan ?? "app";
+      // The IV is a deterministic function of seq; reject any other IV before
+      // decryption (mirrors the drone-side check).
+      const rxIv = Buffer.from(m.iv, "base64");
+      if (!rxIv.equals(seqToIv(m.seq))) return;
       const aad = frameAad(droneId, "d2u", m.epoch, chan, m.seq);
       // @secret-escapes: pt is application-layer plaintext, not a key;
       // ownership passes to the listener which decides its lifetime.
       const pt = aesGcmDecrypt(
         curKD2U,
         {
-          iv: Buffer.from(m.iv, "base64"),
+          iv: rxIv,
           ct: Buffer.from(m.ct, "base64"),
           tag: Buffer.from(m.tag, "base64"),
         },

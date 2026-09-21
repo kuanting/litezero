@@ -29,6 +29,7 @@ const { inProcessListen, inProcessConnect } = await import(
 const { MAX_SEEN_HELLO_NONCES } = await import("../src/config.ts");
 const { tapTransport } = await import("../src/attacks/_tap.ts");
 const { randomBytes } = await import("node:crypto");
+const { seqToIv } = await import("../src/crypto/primitives.ts");
 type Transport = import("../src/transport/types.ts").Transport;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -63,13 +64,16 @@ function injectable(inner: Transport): Transport & {
 
 /** A syntactically valid but cryptographically bogus d2u app frame. */
 function forgedD2uFrame(seq: number): string {
+  // Use the correct public IV encoding for a well-formed seq, so a forged
+  // frame reaches (and fails) the AEAD check rather than the IV/seq check.
+  const iv = Number.isSafeInteger(seq) && seq >= 0 ? seqToIv(seq) : randomBytes(12);
   return JSON.stringify({
     kind: "data",
     dir: "d2u",
     epoch: 0,
     chan: "app",
     seq,
-    iv: randomBytes(12).toString("base64"),
+    iv: iv.toString("base64"),
     ct: randomBytes(16).toString("base64"),
     tag: randomBytes(16).toString("base64"),
   });
@@ -355,6 +359,74 @@ async function testCumulativeSeqAcrossEpochs(): Promise<TestResult> {
   }
 }
 
+/**
+ * Test 6 (GCM parameter enforcement): an otherwise VALID u2d record is mangled
+ * in transit so that (a) its tag is truncated to 4 bytes — which OpenSSL would
+ * verify successfully if the expected tag length were not pinned — or (b) its
+ * IV is replaced by a different 12-byte value than the encoding of its seq.
+ * In both cases the drone must reject the record (no ACK, error reported),
+ * while an untouched record on a fresh session is still executed.
+ */
+async function testGcmTagAndIvEnforced(): Promise<TestResult> {
+  const attempt = async (
+    mangle: ((f: Record<string, unknown>) => void) | null,
+  ): Promise<{ acked: boolean; error: string }> => {
+    const h = await bootstrap();
+    const inner = h.connectToDrone();
+    let error = "";
+    const link: Transport = {
+      send(raw) {
+        const msg = JSON.parse(raw) as Record<string, unknown>;
+        if (mangle && msg.kind === "data") mangle(msg);
+        inner.send(JSON.stringify(msg));
+      },
+      onMessage(cb) {
+        inner.onMessage((m) => {
+          try {
+            const p = JSON.parse(m) as { kind?: string; reason?: string };
+            if (p.kind === "error") error = p.reason ?? "error";
+          } catch { /* not JSON — pass through */ }
+          cb(m);
+        });
+      },
+      onClose: (cb) => inner.onClose(cb),
+      close: () => inner.close(),
+    };
+    const session = await runUserHandshake({
+      identity: h.userIdentity,
+      droneId: h.droneId,
+      cloud: inProcessCloudClient(h.cloud),
+      link,
+    });
+    const acked = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), 400);
+      session.onFrame(() => { clearTimeout(timer); resolve(true); });
+      session.send(Buffer.from("gcm-param-check")).catch(() => { clearTimeout(timer); resolve(false); });
+    });
+    session.close();
+    await h.shutdown();
+    return { acked, error };
+  };
+
+  const shortTag = await attempt((f) => {
+    f.tag = Buffer.from(f.tag as string, "base64").subarray(0, 4).toString("base64");
+  });
+  const wrongIv = await attempt((f) => {
+    f.iv = randomBytes(12).toString("base64");
+  });
+  const control = await attempt(null);
+
+  const passed = !shortTag.acked && !wrongIv.acked && control.acked
+    && /aead verify failed/.test(shortTag.error) && /iv does not match seq/.test(wrongIv.error);
+  return {
+    name: "GCM tag length (16 B) and IV=enc(seq) enforced before decryption",
+    passed,
+    detail: passed
+      ? "4-byte-tag record rejected; mismatched-IV record rejected; untouched record executed"
+      : `enforcement wrong (shortTag=${JSON.stringify(shortTag)}, wrongIv=${JSON.stringify(wrongIv)}, control=${JSON.stringify(control)}) — BAD`,
+  };
+}
+
 async function main() {
   const tests = [
     testRebootReplay,
@@ -362,6 +434,7 @@ async function main() {
     testSendCapAndRekeyReset,
     testRecvCapCountsForgedAttempts,
     testCumulativeSeqAcrossEpochs,
+    testGcmTagAndIvEnforced,
   ];
   const results: TestResult[] = [];
   for (const t of tests) results.push(await t());
