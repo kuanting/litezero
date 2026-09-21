@@ -145,6 +145,19 @@ export async function runUserHandshake(params: {
     link.close();
     throw new Error("cloud signature on token invalid");
   }
+  // The token must name THIS user, the INTENDED drone, and the nonce we sent.
+  // A validly signed token for another (user, drone) pair — e.g. one minted
+  // under a stolen sk_C — must not be signed into our hello: it would let the
+  // user's and the drone's views of the peer identities diverge while their
+  // transcripts agree. (The drone independently checks droneId on its side.)
+  if (
+    signed.token.userId !== identity.userId ||
+    signed.token.droneId !== droneId ||
+    signed.token.nonceU !== nonceU.toString("base64")
+  ) {
+    link.close();
+    throw new Error("auth token does not match this request (userId/droneId/nonce)");
+  }
 
   const eph = ephemeralEcdh();
 
