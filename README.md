@@ -83,7 +83,7 @@ npm run reproduce      # one command: re-runs every experiment in the paper, wri
 | `npm run mavlink:interop` | Byte-compatibility against pymavlink, both directions (`pip install pymavlink` first) |
 | `npm run bench` / `bench:bun` | Microbenchmarks (handshake latency, AEAD seal/open) under Node / Bun |
 | `npm run lint:secrets` | Dead-secret static lint: every secret-producing call must be zeroized in the same function, or carry a documented `@secret-escapes` exemption |
-| `npm run verifpal` | Verify the three Verifpal models (requires `verifpal` **0.53.0** on PATH — releases 0.60+ do not parse the classic language) |
+| `npm run verifpal` | Verify the four Verifpal models (requires `verifpal` **0.53.0** on PATH — releases 0.60+ do not parse the classic language) |
 | `npm run typecheck` | `tsc --noEmit` under `strict: true` |
 | `npm run reproduce` | Re-runs demo + battery + benchmarks with a pinned seed; writes text artifacts and a pass/fail digest to `out/` |
 

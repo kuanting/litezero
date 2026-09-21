@@ -226,7 +226,8 @@ export async function runUserHandshake(params: {
   // Determine the drone's static pub key P_D from the owner-PINNED record
   // (Option A): it was verified offline against the owner trust anchor at
   // provisioning, so it does not depend on the cloud. Pinning is MANDATORY
-  // (Algorithm 1 step 13) — there is no fallback to the token's P_D, because
+  // (pinned at enrollment, Algorithm 1 step 6; used at Algorithm 2 step 15) —
+  // there is no fallback to the token's P_D, because
   // under a stolen sk_C a forged token could advertise a bogus P_D and lure an
   // unpinned user onto a fake drone. If the cloud-signed token advertises a
   // different P_D than the pin, abort — that is a substitution attempt.

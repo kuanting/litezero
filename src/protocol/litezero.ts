@@ -97,10 +97,10 @@ export function transcriptHash(t: TranscriptInput): Buffer {
 /**
  * From the ECDH secret + nonces + transcript hash, derive the directional
  * session keys and the key-confirmation MAC key. The transcript hash enters
- * the HKDF-Expand info alongside the fixed master label, so two sessions with
- * different transcripts cannot derive the same keys by construction (the
- * TLS 1.3 pattern); the finished MACs over the transcript remain as explicit
- * key confirmation. The 64-byte HKDF master is split into a session
+ * the HKDF info alongside the fixed master label (the TLS 1.3 pattern), so two
+ * sessions with different transcripts evaluate HKDF on different inputs; equal
+ * keys would require an HKDF output collision (negligible, not impossible).
+ * The finished MACs over the transcript remain as explicit key confirmation. The 64-byte HKDF master is split into a session
  * root (ks) and a MAC key (km); ks seeds the two directional subkeys and is
  * then discarded. The master (root ks included) is zeroized before returning,
  * and only an independent copy of km escapes — so the caller only has to wipe
